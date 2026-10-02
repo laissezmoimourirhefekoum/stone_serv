@@ -16,42 +16,64 @@ const __dirname = path.dirname(__filename);
 
 const envPath = path.join(__dirname, ".env");
 
-if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-  function loadEnvFile(filePath) {
-    try {
-      const envContent = fs.readFileSync(filePath, "utf-8");
-      const lines = envContent.split("\n");
+// ============================================================
+// CHARGEMENT DU .env (robuste)
+// ============================================================
+//
+// - gère les fins de ligne CRLF (\r\n)
+// - retire les guillemets autour des valeurs
+// - n'écrase JAMAIS une variable déjà définie dans l'environnement
+//   (les variables de l'hébergeur ont la priorité)
+// - est toujours appelé : un .env absent n'est pas une erreur
 
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (trimmedLine && !trimmedLine.startsWith("#")) {
-          const [key, ...valueParts] = trimmedLine.split("=");
-          if (key && valueParts.length > 0) {
-            const value = valueParts.join("=").trim();
-            process.env[key.trim()] = value;
-          }
-        }
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+
+  try {
+    const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (!trimmed || trimmed.startsWith("#")) continue;
+
+      const idx = trimmed.indexOf("=");
+      if (idx === -1) continue;
+
+      const key = trimmed.slice(0, idx).trim();
+      let value = trimmed.slice(idx + 1).trim();
+
+      // Retire les guillemets simples ou doubles autour de la valeur
+      value = value.replace(/^(['"])(.*)\1$/, "$2");
+
+      if (key && !(key in process.env)) {
+        process.env[key] = value;
       }
-    } catch (error) {
-      console.error(`Erreur lors du chargement de ${filePath}:`, error.message);
     }
+  } catch (error) {
+    console.error(`Erreur lors du chargement de ${filePath}:`, error.message);
   }
+}
 
-  loadEnvFile(envPath);
+loadEnvFile(envPath);
+
+function env(name) {
+  const value = process.env[name];
+  return typeof value === "string" ? value.trim() : undefined;
 }
 
 // ============================================================
 // CONFIGURATION
 // ============================================================
 
-const PORT = Number(process.env.PORT || 3002);
+const PORT = Number(env("PORT") || 3002);
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_URL = env("SUPABASE_URL");
+const SUPABASE_ANON_KEY = env("SUPABASE_ANON_KEY");
+const SUPABASE_SERVICE_ROLE_KEY = env("SUPABASE_SERVICE_ROLE_KEY");
 
 const DEFAULT_OAUTH_REDIRECT =
-  process.env.OAUTH_REDIRECT_URL || "http://localhost:5173/";
+  env("OAUTH_REDIRECT_URL") || "http://localhost:5173/";
 
 const AVATAR_BUCKET = "avatars";
 const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
@@ -60,26 +82,23 @@ const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
 // CONFIGURATION STRIPE
 // ============================================================
 
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY");
+const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
-const APP_URL = (process.env.APP_URL || "http://localhost:5173").replace(
-  /\/$/,
-  ""
-);
+const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/$/, "");
 
 const STRIPE_PRICES = {
   starter: {
-    monthly: process.env.STRIPE_PRICE_STARTER_MONTHLY,
-    annual: process.env.STRIPE_PRICE_STARTER_ANNUAL,
+    monthly: env("STRIPE_PRICE_STARTER_MONTHLY"),
+    annual: env("STRIPE_PRICE_STARTER_ANNUAL"),
   },
   pro: {
-    monthly: process.env.STRIPE_PRICE_PRO_MONTHLY,
-    annual: process.env.STRIPE_PRICE_PRO_ANNUAL,
+    monthly: env("STRIPE_PRICE_PRO_MONTHLY"),
+    annual: env("STRIPE_PRICE_PRO_ANNUAL"),
   },
   enterprise: {
-    monthly: process.env.STRIPE_PRICE_ENTERPRISE_MONTHLY,
-    annual: process.env.STRIPE_PRICE_ENTERPRISE_ANNUAL,
+    monthly: env("STRIPE_PRICE_ENTERPRISE_MONTHLY"),
+    annual: env("STRIPE_PRICE_ENTERPRISE_ANNUAL"),
   },
 };
 
@@ -91,20 +110,50 @@ const stripe = STRIPE_SECRET_KEY
 // VÉRIFICATION SUPABASE
 // ============================================================
 
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
+const missingVars = [
+  ["SUPABASE_URL", SUPABASE_URL],
+  ["SUPABASE_ANON_KEY", SUPABASE_ANON_KEY],
+  ["SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY],
+]
+  .filter(([, value]) => !value)
+  .map(([name]) => name);
+
+if (missingVars.length > 0) {
   console.error("");
-  console.error("Supabase non configuré.");
+  console.error("Supabase non configuré. Variables manquantes :");
+  for (const name of missingVars) console.error(` - ${name}`);
   console.error("");
-  console.error("Le fichier attendu est :");
+  console.error("Définis-les dans les variables d'environnement de");
+  console.error("ton hébergeur, ou dans le fichier :");
   console.error(envPath);
-  console.error("");
-  console.error("Il doit contenir :");
-  console.error("SUPABASE_URL=...");
-  console.error("SUPABASE_ANON_KEY=...");
-  console.error("SUPABASE_SERVICE_ROLE_KEY=...");
   console.error("");
 
   process.exit(1);
+}
+
+// Valide que SUPABASE_URL est une vraie URL http(s)
+try {
+  const parsed = new URL(SUPABASE_URL);
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("Protocole invalide");
+  }
+} catch {
+  console.error("");
+  console.error("SUPABASE_URL invalide :", JSON.stringify(SUPABASE_URL));
+  console.error(
+    "Elle doit ressembler à : https://xxxxxxxx.supabase.co (sans guillemets)."
+  );
+  console.error("");
+
+  process.exit(1);
+}
+
+// Debug optionnel : DEBUG_ENV=1 (n'affiche jamais les secrets)
+if (env("DEBUG_ENV") === "1") {
+  console.log("[env] SUPABASE_URL      :", JSON.stringify(SUPABASE_URL));
+  console.log("[env] ANON key length   :", SUPABASE_ANON_KEY.length);
+  console.log("[env] SERVICE key length:", SUPABASE_SERVICE_ROLE_KEY.length);
 }
 
 if (!STRIPE_SECRET_KEY) {
@@ -145,10 +194,18 @@ const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 // ============================================================
 // CORS
 // ============================================================
+//
+// Origines autorisées : localhost + APP_URL + ALLOWED_ORIGINS
+// (liste séparée par des virgules, ex. "https://app.stone.com,https://stone.com")
 
 const allowedOrigins = new Set([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
+  APP_URL,
+  ...(env("ALLOWED_ORIGINS") || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean),
 ]);
 
 function setCorsHeaders(req, res) {
@@ -156,6 +213,7 @@ function setCorsHeaders(req, res) {
 
   if (origin && allowedOrigins.has(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
   }
 
   res.setHeader(
@@ -304,9 +362,14 @@ function extractAvatarStoragePath(filePathOrUrl) {
   const markerIndex = filePathOrUrl.indexOf(marker);
 
   if (markerIndex !== -1) {
-    return decodeURIComponent(
-      filePathOrUrl.slice(markerIndex + marker.length)
-    );
+    // On retire aussi un éventuel query string (?t=...)
+    const raw = filePathOrUrl.slice(markerIndex + marker.length).split("?")[0];
+
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return null;
+    }
   }
 
   if (!filePathOrUrl.startsWith("http")) {
@@ -314,6 +377,17 @@ function extractAvatarStoragePath(filePathOrUrl) {
   }
 
   return null;
+}
+
+// Vérifie que le fichier appartient bien à l'utilisateur
+// (chemin de la forme "<user.id>/<fichier>") et n'essaie pas
+// de remonter dans l'arborescence.
+function isOwnedAvatarPath(storagePath, userId) {
+  if (typeof storagePath !== "string") return false;
+  if (storagePath.includes("..")) return false;
+  if (storagePath.startsWith("/")) return false;
+
+  return storagePath.startsWith(`${userId}/`);
 }
 
 // ============================================================
@@ -1174,6 +1248,9 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // USER AVATAR — DELETE
     // ==========================================================
+    //
+    // SÉCURITÉ : on ne supprime que les fichiers situés dans le
+    // dossier de l'utilisateur authentifié (`<user.id>/...`).
 
     if (req.method === "DELETE" && url.pathname === "/api/user/avatar") {
       const { user, token, error, code } = await getAuthenticatedUser(req);
@@ -1197,8 +1274,18 @@ const server = createServer(async (req, res) => {
 
       const storagePath = extractAvatarStoragePath(filePathOrUrl);
 
+      // URL externe (avatar Google/GitHub) : rien à supprimer
+      // dans notre bucket.
       if (!storagePath) {
         sendJson(res, 200, { success: true });
+        return;
+      }
+
+      if (!isOwnedAvatarPath(storagePath, user.id)) {
+        sendJson(res, 403, {
+          success: false,
+          error: "You can only delete your own avatar",
+        });
         return;
       }
 
