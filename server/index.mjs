@@ -97,7 +97,7 @@ const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
 // URL du FRONTEND de production (ex. https://stone-prod.vercel.app).
 // Utilisée pour success_url, cancel_url et return_url Stripe, ainsi que
-// pour le redirect_uri TikTok par défaut.
+// pour les redirect_uri TikTok et Pinterest par défaut.
 // Ce n'est JAMAIS l'URL Railway du backend.
 const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/+$/, "");
 
@@ -143,6 +143,54 @@ const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100 Mo (le buffer est gardé en mé
 const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
+
+// ============================================================
+// CONFIGURATION PINTEREST
+// ============================================================
+//
+// PINTEREST_REDIRECT_URI doit être IDENTIQUE à l'URI déclarée dans
+// le dashboard développeur Pinterest. Comme pour TikTok, elle pointe
+// vers un VRAI chemin du FRONTEND, sans "#" :
+//   https://stone-prod.vercel.app/pinterest/callback
+//
+// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
+// sur la route hash /#/pinterest-callback.
+//
+// Deux base URLs :
+//   - PINTEREST_OAUTH_BASE : échange / rafraîchissement des tokens
+//                            (toujours api.pinterest.com)
+//   - PINTEREST_API_BASE   : appels API (user_account, boards, pins...)
+//                            sandbox par défaut (accès Trial).
+//                            En production : https://api.pinterest.com/v5
+
+const PINTEREST_APP_ID = env("PINTEREST_APP_ID");
+const PINTEREST_APP_SECRET = env("PINTEREST_APP_SECRET");
+const PINTEREST_REDIRECT_URI =
+  env("PINTEREST_REDIRECT_URI") || `${APP_URL}/pinterest/callback`;
+
+const PINTEREST_SCOPES =
+  env("PINTEREST_SCOPES") ||
+  "user_accounts:read,boards:read,boards:write,pins:read,pins:write";
+
+const PINTEREST_AUTH_URL = "https://www.pinterest.com/oauth/";
+const PINTEREST_OAUTH_BASE = (
+  env("PINTEREST_OAUTH_BASE") || "https://api.pinterest.com/v5"
+).replace(/\/+$/, "");
+const PINTEREST_API_BASE = (
+  env("PINTEREST_API_BASE") || "https://api-sandbox.pinterest.com/v5"
+).replace(/\/+$/, "");
+
+const pinterestEnabled = Boolean(PINTEREST_APP_ID && PINTEREST_APP_SECRET);
+
+// ============================================================
+// SECRET DE SIGNATURE DU STATE OAUTH (TikTok + Pinterest)
+// ============================================================
+//
+// OAUTH_STATE_SECRET est optionnel : à défaut, on utilise le secret
+// TikTok, puis le secret Pinterest.
+
+const OAUTH_STATE_SECRET =
+  env("OAUTH_STATE_SECRET") || TIKTOK_CLIENT_SECRET || PINTEREST_APP_SECRET;
 
 // ============================================================
 // VÉRIFICATION SUPABASE
@@ -194,6 +242,11 @@ if (env("DEBUG_ENV") === "1") {
   console.log("[env] SERVICE key length:", SUPABASE_SERVICE_ROLE_KEY.length);
   console.log("[env] APP_URL           :", JSON.stringify(APP_URL));
   console.log("[env] TIKTOK_REDIRECT   :", JSON.stringify(TIKTOK_REDIRECT_URI));
+  console.log(
+    "[env] PINTEREST_REDIRECT:",
+    JSON.stringify(PINTEREST_REDIRECT_URI)
+  );
+  console.log("[env] PINTEREST_API_BASE:", JSON.stringify(PINTEREST_API_BASE));
 }
 
 if (!STRIPE_SECRET_KEY) {
@@ -212,11 +265,32 @@ if (!tiktokEnabled) {
   );
 }
 
+if (!pinterestEnabled) {
+  console.warn(
+    "⚠️  Pinterest non configuré (PINTEREST_APP_ID / PINTEREST_APP_SECRET manquant)."
+  );
+}
+
 // Un redirect_uri TikTok contenant un "#" est invalide (TikTok refuse
 // les fragments) : on prévient clairement au démarrage.
 if (TIKTOK_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  TIKTOK_REDIRECT_URI contient un "#" (${TIKTOK_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/tiktok/callback.`
+  );
+}
+
+// Idem pour Pinterest : les fragments sont interdits dans une redirect URI OAuth.
+if (PINTEREST_REDIRECT_URI.includes("#")) {
+  console.warn(
+    `⚠️  PINTEREST_REDIRECT_URI contient un "#" (${PINTEREST_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/pinterest/callback.`
+  );
+}
+
+if (pinterestEnabled && PINTEREST_API_BASE.includes("sandbox")) {
+  console.warn(
+    "ℹ️  Pinterest en mode SANDBOX (PINTEREST_API_BASE = " +
+      PINTEREST_API_BASE +
+      ")."
   );
 }
 
@@ -285,7 +359,7 @@ function normalizeOrigin(value) {
 
 // Origines fixes : développement local + frontend Vercel.
 // "https://stone-prod.vercel.app" est le domaine de production : c'est
-// là que TikTok renvoie l'utilisateur, il DOIT être autorisé.
+// là que TikTok / Pinterest renvoient l'utilisateur, il DOIT être autorisé.
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
@@ -733,28 +807,30 @@ async function syncSubscriptionToUser(userId, subscription) {
 }
 
 // ============================================================
-// TIKTOK — STATE OAUTH SIGNÉ (stateless, anti-CSRF)
+// STATE OAUTH SIGNÉ (TikTok + Pinterest, stateless, anti-CSRF)
 // ============================================================
 //
-// Le state contient l'id utilisateur, une expiration (10 min) et
-// un aléa, le tout signé en HMAC avec le client secret TikTok.
+// Le state contient le provider, l'id utilisateur, une expiration
+// (10 min) et un aléa, le tout signé en HMAC. Le provider est inclus
+// dans la signature : un state TikTok ne peut pas être rejoué sur
+// Pinterest, et inversement.
 
 function hmac(value) {
   return crypto
-    .createHmac("sha256", TIKTOK_CLIENT_SECRET)
+    .createHmac("sha256", OAUTH_STATE_SECRET)
     .update(value)
     .digest("hex");
 }
 
-function createTikTokState(userId) {
-  const payload = `${userId}.${Date.now() + 10 * 60 * 1000}.${crypto
+function createOAuthState(provider, userId) {
+  const payload = `${provider}.${userId}.${Date.now() + 10 * 60 * 1000}.${crypto
     .randomBytes(8)
     .toString("hex")}`;
 
   return Buffer.from(`${payload}.${hmac(payload)}`).toString("base64url");
 }
 
-function verifyTikTokState(state, userId) {
+function verifyOAuthState(provider, state, userId) {
   try {
     const decoded = Buffer.from(String(state), "base64url").toString("utf-8");
     const lastDot = decoded.lastIndexOf(".");
@@ -769,9 +845,13 @@ function verifyTikTokState(state, userId) {
 
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
 
-    const [stateUserId, expiresAt] = payload.split(".");
+    const [stateProvider, stateUserId, expiresAt] = payload.split(".");
 
-    return stateUserId === userId && Number(expiresAt) > Date.now();
+    return (
+      stateProvider === provider &&
+      stateUserId === userId &&
+      Number(expiresAt) > Date.now()
+    );
   } catch {
     return false;
   }
@@ -1019,6 +1099,159 @@ function sendTikTokError(res, error) {
 }
 
 // ============================================================
+// PINTEREST — APPEL API
+// ============================================================
+//
+// - `base`  : PINTEREST_API_BASE (sandbox par défaut) ou
+//             PINTEREST_OAUTH_BASE pour les endpoints /oauth/token
+// - `basic` : true pour l'authentification Basic app_id:app_secret
+//             (requise par /oauth/token)
+//
+// Pinterest renvoie les erreurs sous la forme { code, message }
+// avec un statut HTTP non 2xx ; les erreurs OAuth peuvent aussi
+// utiliser { error, error_description }.
+
+async function pinterestApi(
+  pathname,
+  { method = "GET", base = PINTEREST_API_BASE, token, basic = false, form, json } = {}
+) {
+  const headers = { Accept: "application/json" };
+  let body;
+
+  if (basic) {
+    const credentials = Buffer.from(
+      `${PINTEREST_APP_ID}:${PINTEREST_APP_SECRET}`
+    ).toString("base64");
+
+    headers.Authorization = `Basic ${credentials}`;
+  } else if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  if (form) {
+    headers["Content-Type"] = "application/x-www-form-urlencoded";
+    body = new URLSearchParams(form).toString();
+  } else if (json) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(json);
+  }
+
+  const response = await fetch(`${base}${pathname}`, {
+    method,
+    headers,
+    body,
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const err = new Error(
+      data.message ||
+        data.error_description ||
+        (typeof data.error === "string" ? data.error : "") ||
+        `Pinterest error (HTTP ${response.status})`
+    );
+    err.pinterestStatus = response.status;
+    err.pinterestCode = data.code;
+    throw err;
+  }
+
+  return data;
+}
+
+// ============================================================
+// PINTEREST — STOCKAGE / REFRESH DES TOKENS
+// ============================================================
+//
+// Les tokens sont stockés dans la table `pinterest_accounts`
+// (RLS activé, aucune policy : seul le service role y accède).
+
+async function savePinterestTokens(userId, t, extra = {}) {
+  const now = Date.now();
+
+  // access_token : ~30 jours. refresh_token : ~1 an.
+  const accessTtl = Number(t.expires_in) || 30 * 24 * 60 * 60;
+  const refreshTtl =
+    Number(t.refresh_token_expires_in) || 365 * 24 * 60 * 60;
+
+  const { error } = await supabaseAdmin.from("pinterest_accounts").upsert(
+    {
+      user_id: userId,
+      access_token: t.access_token,
+      refresh_token: t.refresh_token,
+      access_expires_at: new Date(now + accessTtl * 1000).toISOString(),
+      refresh_expires_at: new Date(now + refreshTtl * 1000).toISOString(),
+      scope: t.scope || null,
+      updated_at: new Date().toISOString(),
+      ...extra,
+    },
+    { onConflict: "user_id" }
+  );
+
+  if (error) throw new Error(error.message);
+}
+
+async function getPinterestAccount(userId) {
+  const { data } = await supabaseAdmin
+    .from("pinterest_accounts")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  return data || null;
+}
+
+// Retourne un access_token valide (le rafraîchit si nécessaire).
+// Pas encore utilisé par une route : prêt pour la publication de pins.
+async function getValidPinterestToken(userId) {
+  const account = await getPinterestAccount(userId);
+
+  if (!account) {
+    const err = new Error("Pinterest account not connected");
+    err.statusCode = 400;
+    err.code = "PINTEREST_NOT_CONNECTED";
+    throw err;
+  }
+
+  if (new Date(account.access_expires_at).getTime() > Date.now() + 60_000) {
+    return account.access_token;
+  }
+
+  if (new Date(account.refresh_expires_at).getTime() <= Date.now()) {
+    const err = new Error("Pinterest session expired, please reconnect");
+    err.statusCode = 401;
+    err.code = "PINTEREST_REFRESH_EXPIRED";
+    throw err;
+  }
+
+  const refreshed = await pinterestApi("/oauth/token", {
+    method: "POST",
+    base: PINTEREST_OAUTH_BASE,
+    basic: true,
+    form: {
+      grant_type: "refresh_token",
+      refresh_token: account.refresh_token,
+    },
+  });
+
+  // Si Pinterest ne renvoie pas de nouveau refresh_token, on garde l'ancien.
+  await savePinterestTokens(userId, {
+    ...refreshed,
+    refresh_token: refreshed.refresh_token || account.refresh_token,
+  });
+
+  return refreshed.access_token;
+}
+
+function sendPinterestError(res, error) {
+  sendJson(res, error.statusCode || error.pinterestStatus || 500, {
+    success: false,
+    error: error.message || "Pinterest error",
+    code: error.code || error.pinterestCode || undefined,
+  });
+}
+
+// ============================================================
 // SERVER
 // ============================================================
 
@@ -1075,6 +1308,7 @@ const server = createServer(async (req, res) => {
         supabase: true,
         stripe: Boolean(stripe),
         tiktok: tiktokEnabled,
+        pinterest: pinterestEnabled,
       });
 
       return;
@@ -2086,7 +2320,7 @@ const server = createServer(async (req, res) => {
         scope: TIKTOK_SCOPES,
         response_type: "code",
         redirect_uri: TIKTOK_REDIRECT_URI,
-        state: createTikTokState(user.id),
+        state: createOAuthState("tiktok", user.id),
       });
 
       sendJson(res, 200, {
@@ -2116,7 +2350,7 @@ const server = createServer(async (req, res) => {
       const body = await getJsonBody(req);
       const authCode = String(body.code || "");
 
-      if (!authCode || !verifyTikTokState(body.state, user.id)) {
+      if (!authCode || !verifyOAuthState("tiktok", body.state, user.id)) {
         sendJson(res, 400, {
           success: false,
           error: "Invalid or expired state",
@@ -2452,6 +2686,184 @@ const server = createServer(async (req, res) => {
         sendTikTokError(res, tiktokError);
       }
 
+      return;
+    }
+
+    // ==========================================================
+    // PINTEREST — GARDE : configuration
+    // ==========================================================
+
+    if (url.pathname.startsWith("/api/pinterest/") && !pinterestEnabled) {
+      sendJson(res, 500, {
+        success: false,
+        error: "Pinterest is not configured",
+      });
+      return;
+    }
+
+    // ==========================================================
+    // PINTEREST — URL D'AUTORISATION
+    // ==========================================================
+
+    if (req.method === "POST" && url.pathname === "/api/pinterest/auth/url") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const params = new URLSearchParams({
+        client_id: PINTEREST_APP_ID,
+        redirect_uri: PINTEREST_REDIRECT_URI,
+        response_type: "code",
+        scope: PINTEREST_SCOPES,
+        state: createOAuthState("pinterest", user.id),
+      });
+
+      sendJson(res, 200, {
+        success: true,
+        url: `${PINTEREST_AUTH_URL}?${params.toString()}`,
+      });
+
+      return;
+    }
+
+    // ==========================================================
+    // PINTEREST — CALLBACK (échange code -> tokens)
+    // ==========================================================
+    //
+    // Appelé par le frontend (PinterestCallback.tsx) avec { code, state }
+    // récupérés depuis sessionStorage après l'interception de
+    // /pinterest/callback?code=...&state=... par App.tsx.
+
+    if (
+      req.method === "POST" &&
+      url.pathname === "/api/pinterest/auth/callback"
+    ) {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const body = await getJsonBody(req);
+      const authCode = String(body.code || "");
+
+      if (!authCode || !verifyOAuthState("pinterest", body.state, user.id)) {
+        sendJson(res, 400, {
+          success: false,
+          error: "Invalid or expired state",
+        });
+        return;
+      }
+
+      try {
+        const tokens = await pinterestApi("/oauth/token", {
+          method: "POST",
+          base: PINTEREST_OAUTH_BASE,
+          basic: true,
+          form: {
+            grant_type: "authorization_code",
+            code: authCode,
+            redirect_uri: PINTEREST_REDIRECT_URI,
+          },
+        });
+
+        // Profil Pinterest (scope user_accounts:read).
+        // Non bloquant : en sandbox, le profil peut être incomplet.
+        let profile = {};
+
+        try {
+          profile = await pinterestApi("/user_account", {
+            token: tokens.access_token,
+          });
+        } catch (profileError) {
+          console.warn("Pinterest user_account error:", profileError.message);
+        }
+
+        await savePinterestTokens(user.id, tokens, {
+          username: profile.username || null,
+          avatar_url: profile.profile_image || null,
+          account_type: profile.account_type || null,
+        });
+
+        sendJson(res, 200, {
+          success: true,
+          connected: true,
+          account: {
+            display_name: profile.username || null,
+            avatar_url: profile.profile_image || null,
+            account_type: profile.account_type || null,
+          },
+        });
+      } catch (pinterestError) {
+        sendJson(res, 400, { success: false, error: pinterestError.message });
+      }
+
+      return;
+    }
+
+    // ==========================================================
+    // PINTEREST — STATUT DE LA CONNEXION
+    // ==========================================================
+
+    if (req.method === "GET" && url.pathname === "/api/pinterest/status") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const account = await getPinterestAccount(user.id);
+
+      sendJson(res, 200, {
+        success: true,
+        connected: Boolean(account),
+        account: account
+          ? {
+              display_name: account.username,
+              avatar_url: account.avatar_url,
+              account_type: account.account_type,
+              scope: account.scope,
+            }
+          : null,
+      });
+
+      return;
+    }
+
+    // ==========================================================
+    // PINTEREST — DÉCONNEXION
+    // ==========================================================
+    //
+    // On supprime simplement les tokens stockés (pas d'endpoint de
+    // révocation utilisé ici).
+
+    if (
+      req.method === "DELETE" &&
+      url.pathname === "/api/pinterest/disconnect"
+    ) {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const { error: deleteError } = await supabaseAdmin
+        .from("pinterest_accounts")
+        .delete()
+        .eq("user_id", user.id);
+
+      if (deleteError) {
+        sendJson(res, 500, { success: false, error: deleteError.message });
+        return;
+      }
+
+      sendJson(res, 200, { success: true });
       return;
     }
 
