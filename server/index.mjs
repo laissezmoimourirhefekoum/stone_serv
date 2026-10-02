@@ -183,14 +183,55 @@ const PINTEREST_API_BASE = (
 const pinterestEnabled = Boolean(PINTEREST_APP_ID && PINTEREST_APP_SECRET);
 
 // ============================================================
-// SECRET DE SIGNATURE DU STATE OAUTH (TikTok + Pinterest)
+// CONFIGURATION YOUTUBE (Google OAuth 2.0)
+// ============================================================
+//
+// YOUTUBE_REDIRECT_URI doit être IDENTIQUE à l'une des "URI de
+// redirection autorisées" de ton client OAuth (Google Cloud Console).
+// Comme pour TikTok / Pinterest, elle pointe vers un VRAI chemin du
+// FRONTEND, sans "#" :
+//   https://stone-prod.vercel.app/youtube/callback
+//
+// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
+// sur la route hash /#/youtube-callback.
+//
+// Ce client OAuth est distinct de celui utilisé par Supabase pour le
+// "Se connecter avec Google" (même projet Google Cloud possible, mais
+// un client OAuth dédié est recommandé).
+
+const YOUTUBE_CLIENT_ID = env("YOUTUBE_CLIENT_ID");
+const YOUTUBE_CLIENT_SECRET = env("YOUTUBE_CLIENT_SECRET");
+const YOUTUBE_REDIRECT_URI =
+  env("YOUTUBE_REDIRECT_URI") || `${APP_URL}/youtube/callback`;
+
+// Scopes séparés par des espaces ou des virgules.
+const YOUTUBE_SCOPES = (
+  env("YOUTUBE_SCOPES") ||
+  "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload"
+)
+  .split(/[\s,]+/)
+  .filter(Boolean)
+  .join(" ");
+
+const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+const YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3";
+
+const youtubeEnabled = Boolean(YOUTUBE_CLIENT_ID && YOUTUBE_CLIENT_SECRET);
+
+// ============================================================
+// SECRET DE SIGNATURE DU STATE OAUTH (TikTok + Pinterest + YouTube)
 // ============================================================
 //
 // OAUTH_STATE_SECRET est optionnel : à défaut, on utilise le secret
-// TikTok, puis le secret Pinterest.
+// TikTok, puis Pinterest, puis YouTube.
 
 const OAUTH_STATE_SECRET =
-  env("OAUTH_STATE_SECRET") || TIKTOK_CLIENT_SECRET || PINTEREST_APP_SECRET;
+  env("OAUTH_STATE_SECRET") ||
+  TIKTOK_CLIENT_SECRET ||
+  PINTEREST_APP_SECRET ||
+  YOUTUBE_CLIENT_SECRET;
 
 // ============================================================
 // VÉRIFICATION SUPABASE
@@ -247,6 +288,8 @@ if (env("DEBUG_ENV") === "1") {
     JSON.stringify(PINTEREST_REDIRECT_URI)
   );
   console.log("[env] PINTEREST_API_BASE:", JSON.stringify(PINTEREST_API_BASE));
+  console.log("[env] YOUTUBE_REDIRECT  :", JSON.stringify(YOUTUBE_REDIRECT_URI));
+  console.log("[env] YOUTUBE_SCOPES    :", JSON.stringify(YOUTUBE_SCOPES));
 }
 
 if (!STRIPE_SECRET_KEY) {
@@ -271,6 +314,12 @@ if (!pinterestEnabled) {
   );
 }
 
+if (!youtubeEnabled) {
+  console.warn(
+    "⚠️  YouTube non configuré (YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET manquant)."
+  );
+}
+
 // Un redirect_uri TikTok contenant un "#" est invalide (TikTok refuse
 // les fragments) : on prévient clairement au démarrage.
 if (TIKTOK_REDIRECT_URI.includes("#")) {
@@ -283,6 +332,13 @@ if (TIKTOK_REDIRECT_URI.includes("#")) {
 if (PINTEREST_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  PINTEREST_REDIRECT_URI contient un "#" (${PINTEREST_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/pinterest/callback.`
+  );
+}
+
+// Idem pour YouTube / Google : les fragments sont interdits.
+if (YOUTUBE_REDIRECT_URI.includes("#")) {
+  console.warn(
+    `⚠️  YOUTUBE_REDIRECT_URI contient un "#" (${YOUTUBE_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/youtube/callback.`
   );
 }
 
@@ -1252,6 +1308,193 @@ function sendPinterestError(res, error) {
 }
 
 // ============================================================
+// YOUTUBE — APPEL API GOOGLE
+// ============================================================
+//
+// Utilisé pour les endpoints OAuth (token, revoke) et pour l'API
+// YouTube Data v3.
+//
+// Formats d'erreur Google :
+//   - OAuth : { error: "invalid_grant", error_description: "..." }
+//   - API   : { error: { code, message, errors: [...] } }
+
+async function googleRequest(
+  requestUrl,
+  { method = "GET", token, form, json } = {}
+) {
+  const headers = { Accept: "application/json" };
+  let body;
+
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  if (form) {
+    headers["Content-Type"] = "application/x-www-form-urlencoded";
+    body = new URLSearchParams(form).toString();
+  } else if (json) {
+    headers["Content-Type"] = "application/json; charset=UTF-8";
+    body = JSON.stringify(json);
+  }
+
+  const response = await fetch(requestUrl, { method, headers, body });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const oauthError = typeof data.error === "string" ? data.error : undefined;
+
+    const err = new Error(
+      data.error_description ||
+        data.error?.message ||
+        oauthError ||
+        `Google error (HTTP ${response.status})`
+    );
+    err.googleStatus = response.status;
+    err.googleError = oauthError;
+    throw err;
+  }
+
+  return data;
+}
+
+// Chaîne YouTube du compte Google connecté (ou null si le compte n'en a pas).
+async function fetchYouTubeChannel(accessToken) {
+  const data = await googleRequest(
+    `${YOUTUBE_API_BASE}/channels?part=snippet&mine=true`,
+    { token: accessToken }
+  );
+
+  const channel = data.items?.[0];
+  if (!channel) return null;
+
+  const thumbnails = channel.snippet?.thumbnails || {};
+
+  return {
+    id: channel.id,
+    title: channel.snippet?.title || null,
+    customUrl: channel.snippet?.customUrl || null,
+    avatarUrl:
+      thumbnails.high?.url ||
+      thumbnails.medium?.url ||
+      thumbnails.default?.url ||
+      null,
+  };
+}
+
+// ============================================================
+// YOUTUBE — STOCKAGE / REFRESH DES TOKENS
+// ============================================================
+//
+// Les tokens sont stockés dans la table `youtube_accounts`
+// (RLS activé, aucune policy : seul le service role y accède).
+//
+// - access_token : ~1 h
+// - refresh_token : sans expiration, SAUF si l'écran de consentement
+//   est en mode "Testing" (7 jours) : Google renvoie alors
+//   refresh_token_expires_in, que l'on mémorise.
+
+async function saveYouTubeTokens(userId, t, extra = {}) {
+  const now = Date.now();
+  const accessTtl = Number(t.expires_in) || 3600;
+
+  const row = {
+    user_id: userId,
+    access_token: t.access_token,
+    access_expires_at: new Date(now + accessTtl * 1000).toISOString(),
+    updated_at: new Date().toISOString(),
+    ...extra,
+  };
+
+  if (t.refresh_token) row.refresh_token = t.refresh_token;
+  if (t.scope) row.scope = t.scope;
+
+  // undefined = ne pas toucher (cas du refresh) ; null / nombre = on écrit.
+  if (t.refresh_token_expires_in !== undefined) {
+    row.refresh_expires_at = t.refresh_token_expires_in
+      ? new Date(now + Number(t.refresh_token_expires_in) * 1000).toISOString()
+      : null;
+  }
+
+  const { error } = await supabaseAdmin
+    .from("youtube_accounts")
+    .upsert(row, { onConflict: "user_id" });
+
+  if (error) throw new Error(error.message);
+}
+
+async function getYouTubeAccount(userId) {
+  const { data } = await supabaseAdmin
+    .from("youtube_accounts")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  return data || null;
+}
+
+// Retourne un access_token valide (le rafraîchit si nécessaire).
+// Pas encore utilisé par une route : prêt pour la publication de vidéos.
+async function getValidYouTubeToken(userId) {
+  const account = await getYouTubeAccount(userId);
+
+  if (!account) {
+    const err = new Error("YouTube account not connected");
+    err.statusCode = 400;
+    err.code = "YOUTUBE_NOT_CONNECTED";
+    throw err;
+  }
+
+  if (new Date(account.access_expires_at).getTime() > Date.now() + 60_000) {
+    return account.access_token;
+  }
+
+  const refreshExpired =
+    account.refresh_expires_at &&
+    new Date(account.refresh_expires_at).getTime() <= Date.now();
+
+  if (!account.refresh_token || refreshExpired) {
+    const err = new Error("YouTube session expired, please reconnect");
+    err.statusCode = 401;
+    err.code = "YOUTUBE_REFRESH_EXPIRED";
+    throw err;
+  }
+
+  let refreshed;
+
+  try {
+    refreshed = await googleRequest(GOOGLE_TOKEN_URL, {
+      method: "POST",
+      form: {
+        client_id: YOUTUBE_CLIENT_ID,
+        client_secret: YOUTUBE_CLIENT_SECRET,
+        grant_type: "refresh_token",
+        refresh_token: account.refresh_token,
+      },
+    });
+  } catch (refreshError) {
+    // invalid_grant : token révoqué par l'utilisateur ou expiré (mode Testing).
+    if (refreshError.googleError === "invalid_grant") {
+      const err = new Error("YouTube session expired, please reconnect");
+      err.statusCode = 401;
+      err.code = "YOUTUBE_REFRESH_EXPIRED";
+      throw err;
+    }
+
+    throw refreshError;
+  }
+
+  await saveYouTubeTokens(userId, refreshed);
+  return refreshed.access_token;
+}
+
+function sendYouTubeError(res, error) {
+  sendJson(res, error.statusCode || error.googleStatus || 500, {
+    success: false,
+    error: error.message || "YouTube error",
+    code: error.code || error.googleError || undefined,
+  });
+}
+
+// ============================================================
 // SERVER
 // ============================================================
 
@@ -1309,6 +1552,7 @@ const server = createServer(async (req, res) => {
         stripe: Boolean(stripe),
         tiktok: tiktokEnabled,
         pinterest: pinterestEnabled,
+        youtube: youtubeEnabled,
       });
 
       return;
@@ -2806,6 +3050,84 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
+    // PINTEREST — CONNEXION PAR TOKEN MANUEL (DEV / SANDBOX)
+    // ==========================================================
+    //
+    // Permet de tester sans redirect URI : on colle un access token
+    // généré dans le portail développeur Pinterest.
+    // Désactivé par défaut : PINTEREST_ALLOW_MANUAL_TOKEN=1 pour l'activer.
+
+    if (req.method === "POST" && url.pathname === "/api/pinterest/auth/token") {
+      if (env("PINTEREST_ALLOW_MANUAL_TOKEN") !== "1") {
+        sendJson(res, 403, {
+          success: false,
+          error: "Manual token connection is disabled",
+        });
+        return;
+      }
+
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const body = await getJsonBody(req);
+      const accessToken = String(body.access_token || "").trim();
+
+      if (!accessToken) {
+        sendJson(res, 400, { success: false, error: "Missing access_token" });
+        return;
+      }
+
+      let profile;
+
+      try {
+        profile = await pinterestApi("/user_account", { token: accessToken });
+      } catch (profileError) {
+        sendJson(res, 400, {
+          success: false,
+          error: `Invalid Pinterest token: ${profileError.message}`,
+        });
+        return;
+      }
+
+      try {
+        // Pas de refresh token : le compte devra être reconnecté à l'expiration.
+        await savePinterestTokens(
+          user.id,
+          {
+            access_token: accessToken,
+            refresh_token: null,
+            expires_in: 29 * 24 * 60 * 60,
+            refresh_token_expires_in: 29 * 24 * 60 * 60,
+          },
+          {
+            username: profile.username || null,
+            avatar_url: profile.profile_image || null,
+            account_type: profile.account_type || null,
+          }
+        );
+      } catch (saveError) {
+        sendJson(res, 500, { success: false, error: saveError.message });
+        return;
+      }
+
+      sendJson(res, 200, {
+        success: true,
+        connected: true,
+        account: {
+          display_name: profile.username || null,
+          avatar_url: profile.profile_image || null,
+          account_type: profile.account_type || null,
+        },
+      });
+
+      return;
+    }
+
+    // ==========================================================
     // PINTEREST — STATUT DE LA CONNEXION
     // ==========================================================
 
@@ -2861,6 +3183,225 @@ const server = createServer(async (req, res) => {
       if (deleteError) {
         sendJson(res, 500, { success: false, error: deleteError.message });
         return;
+      }
+
+      sendJson(res, 200, { success: true });
+      return;
+    }
+
+    // ==========================================================
+    // YOUTUBE — GARDE : configuration
+    // ==========================================================
+
+    if (url.pathname.startsWith("/api/youtube/") && !youtubeEnabled) {
+      sendJson(res, 500, {
+        success: false,
+        error: "YouTube is not configured",
+      });
+      return;
+    }
+
+    // ==========================================================
+    // YOUTUBE — URL D'AUTORISATION
+    // ==========================================================
+    //
+    // access_type=offline + prompt=consent : garantit que Google
+    // renvoie un refresh_token à chaque connexion.
+
+    if (req.method === "POST" && url.pathname === "/api/youtube/auth/url") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const params = new URLSearchParams({
+        client_id: YOUTUBE_CLIENT_ID,
+        redirect_uri: YOUTUBE_REDIRECT_URI,
+        response_type: "code",
+        scope: YOUTUBE_SCOPES,
+        access_type: "offline",
+        prompt: "consent",
+        include_granted_scopes: "true",
+        state: createOAuthState("youtube", user.id),
+      });
+
+      sendJson(res, 200, {
+        success: true,
+        url: `${GOOGLE_AUTH_URL}?${params.toString()}`,
+      });
+
+      return;
+    }
+
+    // ==========================================================
+    // YOUTUBE — CALLBACK (échange code -> tokens)
+    // ==========================================================
+    //
+    // Appelé par le frontend (YouTubeCallback.tsx) avec { code, state }
+    // récupérés depuis sessionStorage après l'interception de
+    // /youtube/callback?code=...&state=... par App.tsx.
+
+    if (req.method === "POST" && url.pathname === "/api/youtube/auth/callback") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const body = await getJsonBody(req);
+      const authCode = String(body.code || "");
+
+      if (!authCode || !verifyOAuthState("youtube", body.state, user.id)) {
+        sendJson(res, 400, {
+          success: false,
+          error: "Invalid or expired state",
+        });
+        return;
+      }
+
+      try {
+        const tokens = await googleRequest(GOOGLE_TOKEN_URL, {
+          method: "POST",
+          form: {
+            client_id: YOUTUBE_CLIENT_ID,
+            client_secret: YOUTUBE_CLIENT_SECRET,
+            code: authCode,
+            grant_type: "authorization_code",
+            redirect_uri: YOUTUBE_REDIRECT_URI,
+          },
+        });
+
+        // Chaîne YouTube : non bloquant si l'appel API échoue,
+        // mais un compte Google SANS chaîne est refusé.
+        let channel = null;
+        let channelLookupFailed = false;
+
+        try {
+          channel = await fetchYouTubeChannel(tokens.access_token);
+        } catch (channelError) {
+          channelLookupFailed = true;
+          console.warn("YouTube channels error:", channelError.message);
+        }
+
+        if (!channelLookupFailed && !channel) {
+          // On révoque l'autorisation qui vient d'être donnée : elle est inutile.
+          try {
+            await googleRequest(GOOGLE_REVOKE_URL, {
+              method: "POST",
+              form: { token: tokens.refresh_token || tokens.access_token },
+            });
+          } catch {
+            // ignore
+          }
+
+          sendJson(res, 400, {
+            success: false,
+            error:
+              "No YouTube channel found on this Google account. Create a channel on youtube.com, then try again.",
+          });
+          return;
+        }
+
+        // Si Google ne renvoie pas de refresh_token, on garde l'ancien (saveYouTubeTokens
+        // n'écrase pas refresh_token quand il est absent).
+        await saveYouTubeTokens(
+          user.id,
+          {
+            ...tokens,
+            refresh_token_expires_in: tokens.refresh_token_expires_in ?? null,
+          },
+          {
+            channel_id: channel?.id || null,
+            channel_title: channel?.title || null,
+            custom_url: channel?.customUrl || null,
+            avatar_url: channel?.avatarUrl || null,
+          }
+        );
+
+        sendJson(res, 200, {
+          success: true,
+          connected: true,
+          account: {
+            display_name: channel?.title || null,
+            avatar_url: channel?.avatarUrl || null,
+          },
+        });
+      } catch (youtubeError) {
+        sendJson(res, 400, { success: false, error: youtubeError.message });
+      }
+
+      return;
+    }
+
+    // ==========================================================
+    // YOUTUBE — STATUT DE LA CONNEXION
+    // ==========================================================
+
+    if (req.method === "GET" && url.pathname === "/api/youtube/status") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const account = await getYouTubeAccount(user.id);
+
+      sendJson(res, 200, {
+        success: true,
+        connected: Boolean(account),
+        account: account
+          ? {
+              display_name: account.channel_title,
+              avatar_url: account.avatar_url,
+              custom_url: account.custom_url,
+              scope: account.scope,
+            }
+          : null,
+      });
+
+      return;
+    }
+
+    // ==========================================================
+    // YOUTUBE — DÉCONNEXION
+    // ==========================================================
+    //
+    // Révoque l'autorisation chez Google (best effort), puis supprime
+    // les tokens stockés.
+
+    if (req.method === "DELETE" && url.pathname === "/api/youtube/disconnect") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      const account = await getYouTubeAccount(user.id);
+
+      if (account) {
+        try {
+          await googleRequest(GOOGLE_REVOKE_URL, {
+            method: "POST",
+            form: { token: account.refresh_token || account.access_token },
+          });
+        } catch (revokeError) {
+          console.warn("YouTube revoke error:", revokeError.message);
+        }
+
+        const { error: deleteError } = await supabaseAdmin
+          .from("youtube_accounts")
+          .delete()
+          .eq("user_id", user.id);
+
+        if (deleteError) {
+          sendJson(res, 500, { success: false, error: deleteError.message });
+          return;
+        }
       }
 
       sendJson(res, 200, { success: true });
