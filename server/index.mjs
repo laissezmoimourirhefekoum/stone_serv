@@ -65,6 +65,11 @@ function env(name) {
 // ============================================================
 // CONFIGURATION
 // ============================================================
+//
+// Backend public (Railway) : https://stoneserv-production.up.railway.app
+// Le backend n'a pas besoin de connaître sa propre URL publique :
+// Railway fournit le host dans chaque requête.
+// Le port est TOUJOURS fourni par Railway via process.env.PORT.
 
 const PORT = Number(env("PORT") || 3002);
 
@@ -72,6 +77,9 @@ const SUPABASE_URL = env("SUPABASE_URL");
 const SUPABASE_ANON_KEY = env("SUPABASE_ANON_KEY");
 const SUPABASE_SERVICE_ROLE_KEY = env("SUPABASE_SERVICE_ROLE_KEY");
 
+// URL du FRONTEND vers laquelle l'utilisateur est renvoyé après
+// Google / GitHub OAuth. Le fallback localhost sert uniquement au
+// développement local.
 const DEFAULT_OAUTH_REDIRECT =
   env("OAUTH_REDIRECT_URL") || "http://localhost:5173/";
 
@@ -85,6 +93,8 @@ const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
 const STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY");
 const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
+// URL du FRONTEND de production (ex. https://mon-frontend.vercel.app).
+// Utilisée pour success_url, cancel_url et return_url Stripe.
 const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/$/, "");
 
 const STRIPE_PRICES = {
@@ -166,6 +176,20 @@ if (!STRIPE_WEBHOOK_SECRET) {
   );
 }
 
+// Avertissements utiles en production (Railway) : sans ces variables,
+// les redirections Stripe et OAuth pointeraient vers localhost.
+if (!env("APP_URL")) {
+  console.warn(
+    "⚠️  APP_URL manquant — fallback http://localhost:5173 (à définir en production avec l'URL du frontend)."
+  );
+}
+
+if (!env("OAUTH_REDIRECT_URL")) {
+  console.warn(
+    "⚠️  OAUTH_REDIRECT_URL manquant — fallback http://localhost:5173/ (à définir en production avec l'URL du frontend)."
+  );
+}
+
 // ============================================================
 // CLIENT SUPABASE
 // ============================================================
@@ -195,8 +219,12 @@ const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 // CORS
 // ============================================================
 //
-// Origines autorisées : localhost + APP_URL + ALLOWED_ORIGINS
-// (liste séparée par des virgules, ex. "https://app.stone.com,https://stone.com")
+// Origines autorisées : localhost (dev Vite) + APP_URL (frontend de
+// production) + ALLOWED_ORIGINS (liste séparée par des virgules,
+// ex. "https://app.stone.com,https://stone.com").
+//
+// CORS concerne les origines des FRONTENDS qui appellent l'API :
+// l'URL Railway du backend n'est donc pas ajoutée ici.
 
 const allowedOrigins = new Set([
   "http://localhost:5173",
@@ -601,6 +629,10 @@ const server = createServer(async (req, res) => {
     // ----------------------------------------------------------
     // URL
     // ----------------------------------------------------------
+    //
+    // Le host de la requête est fourni correctement par Railway
+    // (ex. stoneserv-production.up.railway.app). Il ne sert ici
+    // qu'à parser le chemin et les paramètres.
 
     const url = new URL(
       req.url || "/",
@@ -1485,6 +1517,9 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // STRIPE — WEBHOOK
     // ==========================================================
+    //
+    // URL à configurer dans le dashboard Stripe :
+    // https://stoneserv-production.up.railway.app/api/stripe/webhook
 
     if (req.method === "POST" && url.pathname === "/api/stripe/webhook") {
       if (!stripe || !STRIPE_WEBHOOK_SECRET) {
@@ -1619,7 +1654,7 @@ const server = createServer(async (req, res) => {
 // ============================================================
 
 server.listen(PORT, () => {
-  console.log(`Stone server running on http://localhost:${PORT}`);
+  console.log(`Stone server running on port ${PORT}`);
 });
 
 // ============================================================
