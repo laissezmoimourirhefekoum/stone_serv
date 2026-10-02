@@ -67,7 +67,7 @@ function env(name) {
 // ============================================================
 //
 // Backend public (Railway) : https://stoneserv-production.up.railway.app
-// Frontend (Vercel)        : https://stone-prod-2fpb2146e-xsdevs-projects.vercel.app
+// Frontend (Vercel)        : https://stone-prod.vercel.app
 //
 // Le backend n'a pas besoin de connaître sa propre URL publique :
 // Railway fournit le host dans chaque requête.
@@ -95,8 +95,9 @@ const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
 const STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY");
 const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
-// URL du FRONTEND de production (ex. https://mon-frontend.vercel.app).
-// Utilisée pour success_url, cancel_url et return_url Stripe.
+// URL du FRONTEND de production (ex. https://stone-prod.vercel.app).
+// Utilisée pour success_url, cancel_url et return_url Stripe, ainsi que
+// pour le redirect_uri TikTok par défaut.
 // Ce n'est JAMAIS l'URL Railway du backend.
 const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/+$/, "");
 
@@ -124,8 +125,12 @@ const stripe = STRIPE_SECRET_KEY
 // ============================================================
 //
 // TIKTOK_REDIRECT_URI doit être IDENTIQUE à l'URI déclarée dans
-// le portail TikTok for Developers. Elle pointe vers une page du
-// FRONTEND (ex. https://mon-frontend.vercel.app/tiktok/callback).
+// le portail TikTok for Developers. Elle pointe vers un VRAI chemin
+// du FRONTEND, sans "#" :
+//   https://stone-prod.vercel.app/tiktok/callback
+//
+// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
+// sur la route hash /#/tiktok-callback.
 
 const TIKTOK_CLIENT_KEY = env("TIKTOK_CLIENT_KEY");
 const TIKTOK_CLIENT_SECRET = env("TIKTOK_CLIENT_SECRET");
@@ -187,6 +192,8 @@ if (env("DEBUG_ENV") === "1") {
   console.log("[env] SUPABASE_URL      :", JSON.stringify(SUPABASE_URL));
   console.log("[env] ANON key length   :", SUPABASE_ANON_KEY.length);
   console.log("[env] SERVICE key length:", SUPABASE_SERVICE_ROLE_KEY.length);
+  console.log("[env] APP_URL           :", JSON.stringify(APP_URL));
+  console.log("[env] TIKTOK_REDIRECT   :", JSON.stringify(TIKTOK_REDIRECT_URI));
 }
 
 if (!STRIPE_SECRET_KEY) {
@@ -202,6 +209,14 @@ if (!STRIPE_WEBHOOK_SECRET) {
 if (!tiktokEnabled) {
   console.warn(
     "⚠️  TikTok non configuré (TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET manquant)."
+  );
+}
+
+// Un redirect_uri TikTok contenant un "#" est invalide (TikTok refuse
+// les fragments) : on prévient clairement au démarrage.
+if (TIKTOK_REDIRECT_URI.includes("#")) {
+  console.warn(
+    `⚠️  TIKTOK_REDIRECT_URI contient un "#" (${TIKTOK_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/tiktok/callback.`
   );
 }
 
@@ -268,10 +283,13 @@ function normalizeOrigin(value) {
     .replace(/\/+$/, "");
 }
 
-// Origines fixes : développement local + frontend Vercel actuel.
+// Origines fixes : développement local + frontend Vercel.
+// "https://stone-prod.vercel.app" est le domaine de production : c'est
+// là que TikTok renvoie l'utilisateur, il DOIT être autorisé.
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
+  "https://stone-prod.vercel.app",
   "https://stone-prod-2fpb2146e-xsdevs-projects.vercel.app",
 ];
 
@@ -2083,8 +2101,9 @@ const server = createServer(async (req, res) => {
     // TIKTOK — CALLBACK (échange code -> tokens)
     // ==========================================================
     //
-    // Appelé par le frontend sur la page /tiktok/callback avec
-    // { code, state } récupérés dans l'URL.
+    // Appelé par le frontend (TikTokCallback.tsx) avec { code, state }
+    // récupérés depuis sessionStorage après l'interception de
+    // /tiktok/callback?code=...&state=... par App.tsx.
 
     if (req.method === "POST" && url.pathname === "/api/tiktok/auth/callback") {
       const { user, error, code } = await getAuthenticatedUser(req);
