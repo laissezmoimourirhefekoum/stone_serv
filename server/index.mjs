@@ -67,6 +67,8 @@ function env(name) {
 // ============================================================
 //
 // Backend public (Railway) : https://stoneserv-production.up.railway.app
+// Frontend (Vercel)        : https://stone-prod-2fpb2146e-xsdevs-projects.vercel.app
+//
 // Le backend n'a pas besoin de connaître sa propre URL publique :
 // Railway fournit le host dans chaque requête.
 // Le port est TOUJOURS fourni par Railway via process.env.PORT.
@@ -95,7 +97,8 @@ const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
 // URL du FRONTEND de production (ex. https://mon-frontend.vercel.app).
 // Utilisée pour success_url, cancel_url et return_url Stripe.
-const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/$/, "");
+// Ce n'est JAMAIS l'URL Railway du backend.
+const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/+$/, "");
 
 const STRIPE_PRICES = {
   starter: {
@@ -216,32 +219,95 @@ const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 // ============================================================
-// CORS
+// CORS (système unique)
 // ============================================================
 //
-// Origines autorisées : localhost (dev Vite) + APP_URL (frontend de
-// production) + ALLOWED_ORIGINS (liste séparée par des virgules,
-// ex. "https://app.stone.com,https://stone.com").
+// CORS concerne les origines des FRONTENDS qui appellent l'API.
+// L'URL Railway du backend n'est donc PAS ajoutée ici.
 //
-// CORS concerne les origines des FRONTENDS qui appellent l'API :
-// l'URL Railway du backend n'est donc pas ajoutée ici.
+// Origines autorisées :
+//   1. les origines codées en dur ci-dessous (dev local + frontend Vercel)
+//   2. APP_URL (URL du frontend de production)
+//   3. ALLOWED_ORIGINS (liste séparée par des virgules,
+//      ex. "https://app.stone.com,https://stone.com")
+//   4. les URLs de déploiement Vercel du projet (motif strict ci-dessous)
+//
+// Comme les credentials sont activés, on ne renvoie JAMAIS "*" :
+// on renvoie l'origine exacte du navigateur, uniquement si elle est
+// autorisée.
 
-const allowedOrigins = new Set([
+function normalizeOrigin(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\/+$/, "");
+}
+
+// Origines fixes : développement local + frontend Vercel actuel.
+const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
-  APP_URL,
-  ...(env("ALLOWED_ORIGINS") || "")
-    .split(",")
-    .map((origin) => origin.trim().replace(/\/$/, ""))
-    .filter(Boolean),
-]);
+  "https://stone-prod-2fpb2146e-xsdevs-projects.vercel.app",
+];
+
+// Les URLs de déploiement Vercel changent à chaque build
+// (stone-prod-<hash>-xsdevs-projects.vercel.app). Ce motif strict
+// n'accepte que les URLs du scope "xsdevs-projects" pour le projet
+// "stone-prod", en HTTPS uniquement.
+const VERCEL_DEPLOYMENT_ORIGIN_PATTERN =
+  /^https:\/\/stone-prod(-[a-z0-9]+)?-xsdevs-projects\.vercel\.app$/;
+
+const extraAllowedOrigins = (env("ALLOWED_ORIGINS") || "")
+  .split(",")
+  .map(normalizeOrigin)
+  .filter(Boolean);
+
+if (extraAllowedOrigins.includes("*")) {
+  console.warn(
+    '⚠️  ALLOWED_ORIGINS contient "*" : ignoré (incompatible avec les credentials). Liste les origines explicitement.'
+  );
+}
+
+const allowedOrigins = new Set(
+  [
+    ...DEFAULT_ALLOWED_ORIGINS,
+    APP_URL,
+    ...extraAllowedOrigins.filter((origin) => origin !== "*"),
+  ]
+    .map(normalizeOrigin)
+    .filter(Boolean)
+);
+
+function isOriginAllowed(origin) {
+  if (!origin || typeof origin !== "string") return false;
+
+  const normalized = normalizeOrigin(origin);
+
+  return (
+    allowedOrigins.has(normalized) ||
+    VERCEL_DEPLOYMENT_ORIGIN_PATTERN.test(normalized)
+  );
+}
+
+// Origines refusées déjà signalées (évite de spammer les logs Railway).
+const warnedRejectedOrigins = new Set();
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
 
-  if (origin && allowedOrigins.has(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
+  // Le résultat dépend de l'en-tête Origin : les caches doivent le savoir,
+  // que l'origine soit autorisée ou non.
+  res.setHeader("Vary", "Origin");
+
+  if (origin) {
+    if (isOriginAllowed(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", normalizeOrigin(origin));
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    } else if (!warnedRejectedOrigins.has(origin)) {
+      warnedRejectedOrigins.add(origin);
+      console.warn(
+        `[cors] Origine refusée : ${origin} — ajoute-la à ALLOWED_ORIGINS ou APP_URL sur Railway si elle est légitime.`
+      );
+    }
   }
 
   res.setHeader(
@@ -249,9 +315,19 @@ function setCorsHeaders(req, res) {
     "GET, POST, PUT, PATCH, DELETE, OPTIONS"
   );
 
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // Si le navigateur annonce les headers de sa requête (preflight),
+  // on les accepte ; sinon valeur par défaut.
+  const requestedHeaders = req.headers["access-control-request-headers"];
 
-  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    typeof requestedHeaders === "string" && requestedHeaders
+      ? requestedHeaders
+      : "Content-Type, Authorization"
+  );
+
+  // Le navigateur peut mettre le preflight en cache 24 h.
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
 
 // ============================================================
@@ -421,6 +497,10 @@ function isOwnedAvatarPath(storagePath, userId) {
 // ============================================================
 // RESPONSE
 // ============================================================
+//
+// Les headers CORS sont posés avec res.setHeader() au tout début de
+// chaque requête : res.writeHead() les conserve, donc toutes les
+// réponses (succès, 4xx, 5xx, 404) portent les headers CORS.
 
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -613,19 +693,34 @@ async function syncSubscriptionToUser(userId, subscription) {
 // ============================================================
 
 const server = createServer(async (req, res) => {
+  // ----------------------------------------------------------
+  // CORS — TOUJOURS EN PREMIER
+  // ----------------------------------------------------------
+  //
+  // Exécuté avant toute lecture de body, toute authentification et
+  // toute route : aucune exception de la logique métier ne peut
+  // survenir avant que les headers CORS soient posés.
+
   try {
     setCorsHeaders(req, res);
+  } catch (corsError) {
+    console.error("CORS error:", corsError);
+  }
 
-    // ----------------------------------------------------------
-    // CORS
-    // ----------------------------------------------------------
+  // ----------------------------------------------------------
+  // PREFLIGHT (OPTIONS) — répondu immédiatement
+  // ----------------------------------------------------------
+  //
+  // Un OPTIONS n'atteint jamais les routes, l'authentification
+  // ni le 404.
 
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, { "Content-Length": "0" });
+    res.end();
+    return;
+  }
 
+  try {
     // ----------------------------------------------------------
     // URL
     // ----------------------------------------------------------
@@ -1520,6 +1615,9 @@ const server = createServer(async (req, res) => {
     //
     // URL à configurer dans le dashboard Stripe :
     // https://stoneserv-production.up.railway.app/api/stripe/webhook
+    //
+    // Les webhooks viennent des serveurs Stripe (pas d'en-tête Origin) :
+    // ils ne sont pas concernés par CORS, seule la signature compte.
 
     if (req.method === "POST" && url.pathname === "/api/stripe/webhook") {
       if (!stripe || !STRIPE_WEBHOOK_SECRET) {
@@ -1639,6 +1737,8 @@ const server = createServer(async (req, res) => {
       method: req.method,
     });
   } catch (error) {
+    // Les headers CORS ont déjà été posés plus haut : cette réponse
+    // d'erreur reste lisible par le navigateur.
     if (!res.headersSent) {
       sendJson(res, 500, {
         success: false,
