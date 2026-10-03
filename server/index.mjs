@@ -1,3 +1,7 @@
+// ============================================================
+// SERVER / index.js  (Stone)
+// ============================================================
+
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { createServer } from "node:http";
@@ -19,12 +23,6 @@ const envPath = path.join(__dirname, ".env");
 // ============================================================
 // CHARGEMENT DU .env (robuste)
 // ============================================================
-//
-// - gère les fins de ligne CRLF (\r\n)
-// - retire les guillemets autour des valeurs
-// - n'écrase JAMAIS une variable déjà définie dans l'environnement
-//   (les variables de l'hébergeur ont la priorité)
-// - est toujours appelé : un .env absent n'est pas une erreur
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -43,7 +41,6 @@ function loadEnvFile(filePath) {
       const key = trimmed.slice(0, idx).trim();
       let value = trimmed.slice(idx + 1).trim();
 
-      // Retire les guillemets simples ou doubles autour de la valeur
       value = value.replace(/^(['"])(.*)\1$/, "$2");
 
       if (key && !(key in process.env)) {
@@ -65,13 +62,6 @@ function env(name) {
 // ============================================================
 // CONFIGURATION
 // ============================================================
-//
-// Backend public (Railway) : https://stoneserv-production.up.railway.app
-// Frontend (Vercel)        : https://stone-prod.vercel.app
-//
-// Le backend n'a pas besoin de connaître sa propre URL publique :
-// Railway fournit le host dans chaque requête.
-// Le port est TOUJOURS fourni par Railway via process.env.PORT.
 
 const PORT = Number(env("PORT") || 3002);
 
@@ -79,9 +69,6 @@ const SUPABASE_URL = env("SUPABASE_URL");
 const SUPABASE_ANON_KEY = env("SUPABASE_ANON_KEY");
 const SUPABASE_SERVICE_ROLE_KEY = env("SUPABASE_SERVICE_ROLE_KEY");
 
-// URL du FRONTEND vers laquelle l'utilisateur est renvoyé après
-// Google / GitHub OAuth. Le fallback localhost sert uniquement au
-// développement local.
 const DEFAULT_OAUTH_REDIRECT =
   env("OAUTH_REDIRECT_URL") || "http://localhost:5173/";
 
@@ -95,10 +82,6 @@ const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
 const STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY");
 const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
-// URL du FRONTEND de production (ex. https://stone-prod.vercel.app).
-// Utilisée pour success_url, cancel_url et return_url Stripe, ainsi que
-// pour les redirect_uri TikTok et Pinterest par défaut.
-// Ce n'est JAMAIS l'URL Railway du backend.
 const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/+$/, "");
 
 const STRIPE_PRICES = {
@@ -124,22 +107,20 @@ const stripe = STRIPE_SECRET_KEY
 // CONFIGURATION TIKTOK
 // ============================================================
 //
-// TIKTOK_REDIRECT_URI doit être IDENTIQUE à l'URI déclarée dans
-// le portail TikTok for Developers. Elle pointe vers un VRAI chemin
-// du FRONTEND, sans "#" :
-//   https://stone-prod.vercel.app/tiktok/callback
-//
-// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
-// sur la route hash /#/tiktok-callback.
+// ⚠️  user.info.stats est requis pour récupérer follower_count.
+//     Les utilisateurs déjà connectés doivent se reconnecter.
 
 const TIKTOK_CLIENT_KEY = env("TIKTOK_CLIENT_KEY");
 const TIKTOK_CLIENT_SECRET = env("TIKTOK_CLIENT_SECRET");
 const TIKTOK_REDIRECT_URI =
   env("TIKTOK_REDIRECT_URI") || `${APP_URL}/tiktok/callback`;
 
-const TIKTOK_SCOPES = "user.info.basic,video.publish,video.upload";
+const TIKTOK_SCOPES =
+  env("TIKTOK_SCOPES") ||
+  "user.info.basic,user.info.stats,video.publish,video.upload";
+
 const TIKTOK_API = "https://open.tiktokapis.com";
-const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100 Mo (le buffer est gardé en mémoire)
+const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
 const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
@@ -147,21 +128,6 @@ const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
 // ============================================================
 // CONFIGURATION PINTEREST
 // ============================================================
-//
-// PINTEREST_REDIRECT_URI doit être IDENTIQUE à l'URI déclarée dans
-// le dashboard développeur Pinterest. Comme pour TikTok, elle pointe
-// vers un VRAI chemin du FRONTEND, sans "#" :
-//   https://stone-prod.vercel.app/pinterest/callback
-//
-// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
-// sur la route hash /#/pinterest-callback.
-//
-// Deux base URLs :
-//   - PINTEREST_OAUTH_BASE : échange / rafraîchissement des tokens
-//                            (toujours api.pinterest.com)
-//   - PINTEREST_API_BASE   : appels API (user_account, boards, pins...)
-//                            sandbox par défaut (accès Trial).
-//                            En production : https://api.pinterest.com/v5
 
 const PINTEREST_APP_ID = env("PINTEREST_APP_ID");
 const PINTEREST_APP_SECRET = env("PINTEREST_APP_SECRET");
@@ -185,26 +151,12 @@ const pinterestEnabled = Boolean(PINTEREST_APP_ID && PINTEREST_APP_SECRET);
 // ============================================================
 // CONFIGURATION YOUTUBE (Google OAuth 2.0)
 // ============================================================
-//
-// YOUTUBE_REDIRECT_URI doit être IDENTIQUE à l'une des "URI de
-// redirection autorisées" de ton client OAuth (Google Cloud Console).
-// Comme pour TikTok / Pinterest, elle pointe vers un VRAI chemin du
-// FRONTEND, sans "#" :
-//   https://stone-prod.vercel.app/youtube/callback
-//
-// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
-// sur la route hash /#/youtube-callback.
-//
-// Ce client OAuth est distinct de celui utilisé par Supabase pour le
-// "Se connecter avec Google" (même projet Google Cloud possible, mais
-// un client OAuth dédié est recommandé).
 
 const YOUTUBE_CLIENT_ID = env("YOUTUBE_CLIENT_ID");
 const YOUTUBE_CLIENT_SECRET = env("YOUTUBE_CLIENT_SECRET");
 const YOUTUBE_REDIRECT_URI =
   env("YOUTUBE_REDIRECT_URI") || `${APP_URL}/youtube/callback`;
 
-// Scopes séparés par des espaces ou des virgules.
 const YOUTUBE_SCOPES = (
   env("YOUTUBE_SCOPES") ||
   "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload"
@@ -221,11 +173,8 @@ const YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3";
 const youtubeEnabled = Boolean(YOUTUBE_CLIENT_ID && YOUTUBE_CLIENT_SECRET);
 
 // ============================================================
-// SECRET DE SIGNATURE DU STATE OAUTH (TikTok + Pinterest + YouTube)
+// SECRET DE SIGNATURE DU STATE OAUTH
 // ============================================================
-//
-// OAUTH_STATE_SECRET est optionnel : à défaut, on utilise le secret
-// TikTok, puis Pinterest, puis YouTube.
 
 const OAUTH_STATE_SECRET =
   env("OAUTH_STATE_SECRET") ||
@@ -258,7 +207,6 @@ if (missingVars.length > 0) {
   process.exit(1);
 }
 
-// Valide que SUPABASE_URL est une vraie URL http(s)
 try {
   const parsed = new URL(SUPABASE_URL);
 
@@ -276,13 +224,13 @@ try {
   process.exit(1);
 }
 
-// Debug optionnel : DEBUG_ENV=1 (n'affiche jamais les secrets)
 if (env("DEBUG_ENV") === "1") {
   console.log("[env] SUPABASE_URL      :", JSON.stringify(SUPABASE_URL));
   console.log("[env] ANON key length   :", SUPABASE_ANON_KEY.length);
   console.log("[env] SERVICE key length:", SUPABASE_SERVICE_ROLE_KEY.length);
   console.log("[env] APP_URL           :", JSON.stringify(APP_URL));
   console.log("[env] TIKTOK_REDIRECT   :", JSON.stringify(TIKTOK_REDIRECT_URI));
+  console.log("[env] TIKTOK_SCOPES     :", JSON.stringify(TIKTOK_SCOPES));
   console.log(
     "[env] PINTEREST_REDIRECT:",
     JSON.stringify(PINTEREST_REDIRECT_URI)
@@ -320,22 +268,18 @@ if (!youtubeEnabled) {
   );
 }
 
-// Un redirect_uri TikTok contenant un "#" est invalide (TikTok refuse
-// les fragments) : on prévient clairement au démarrage.
 if (TIKTOK_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  TIKTOK_REDIRECT_URI contient un "#" (${TIKTOK_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/tiktok/callback.`
   );
 }
 
-// Idem pour Pinterest : les fragments sont interdits dans une redirect URI OAuth.
 if (PINTEREST_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  PINTEREST_REDIRECT_URI contient un "#" (${PINTEREST_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/pinterest/callback.`
   );
 }
 
-// Idem pour YouTube / Google : les fragments sont interdits.
 if (YOUTUBE_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  YOUTUBE_REDIRECT_URI contient un "#" (${YOUTUBE_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/youtube/callback.`
@@ -350,8 +294,6 @@ if (pinterestEnabled && PINTEREST_API_BASE.includes("sandbox")) {
   );
 }
 
-// Avertissements utiles en production (Railway) : sans ces variables,
-// les redirections Stripe et OAuth pointeraient vers localhost.
 if (!env("APP_URL")) {
   console.warn(
     "⚠️  APP_URL manquant — fallback http://localhost:5173 (à définir en production avec l'URL du frontend)."
@@ -369,16 +311,7 @@ if (!env("OAUTH_REDIRECT_URL")) {
 // ============================================================
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-// ============================================================
-// CLIENT SUPABASE ADMIN (Service Role)
-// ============================================================
-
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-// ============================================================
-// CLIENT SUPABASE OAUTH (flow implicite)
-// ============================================================
 
 const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -392,20 +325,6 @@ const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 // ============================================================
 // CORS (système unique)
 // ============================================================
-//
-// CORS concerne les origines des FRONTENDS qui appellent l'API.
-// L'URL Railway du backend n'est donc PAS ajoutée ici.
-//
-// Origines autorisées :
-//   1. les origines codées en dur ci-dessous (dev local + frontend Vercel)
-//   2. APP_URL (URL du frontend de production)
-//   3. ALLOWED_ORIGINS (liste séparée par des virgules,
-//      ex. "https://app.stone.com,https://stone.com")
-//   4. les URLs de déploiement Vercel du projet (motif strict ci-dessous)
-//
-// Comme les credentials sont activés, on ne renvoie JAMAIS "*" :
-// on renvoie l'origine exacte du navigateur, uniquement si elle est
-// autorisée.
 
 function normalizeOrigin(value) {
   return String(value || "")
@@ -413,9 +332,6 @@ function normalizeOrigin(value) {
     .replace(/\/+$/, "");
 }
 
-// Origines fixes : développement local + frontend Vercel.
-// "https://stone-prod.vercel.app" est le domaine de production : c'est
-// là que TikTok / Pinterest renvoient l'utilisateur, il DOIT être autorisé.
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
@@ -423,10 +339,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://stone-prod-2fpb2146e-xsdevs-projects.vercel.app",
 ];
 
-// Les URLs de déploiement Vercel changent à chaque build
-// (stone-prod-<hash>-xsdevs-projects.vercel.app). Ce motif strict
-// n'accepte que les URLs du scope "xsdevs-projects" pour le projet
-// "stone-prod", en HTTPS uniquement.
 const VERCEL_DEPLOYMENT_ORIGIN_PATTERN =
   /^https:\/\/stone-prod(-[a-z0-9]+)?-xsdevs-projects\.vercel\.app$/;
 
@@ -462,14 +374,11 @@ function isOriginAllowed(origin) {
   );
 }
 
-// Origines refusées déjà signalées (évite de spammer les logs Railway).
 const warnedRejectedOrigins = new Set();
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
 
-  // Le résultat dépend de l'en-tête Origin : les caches doivent le savoir,
-  // que l'origine soit autorisée ou non.
   res.setHeader("Vary", "Origin");
 
   if (origin) {
@@ -489,8 +398,6 @@ function setCorsHeaders(req, res) {
     "GET, POST, PUT, PATCH, DELETE, OPTIONS"
   );
 
-  // Si le navigateur annonce les headers de sa requête (preflight),
-  // on les accepte ; sinon valeur par défaut.
   const requestedHeaders = req.headers["access-control-request-headers"];
 
   res.setHeader(
@@ -500,7 +407,6 @@ function setCorsHeaders(req, res) {
       : "Content-Type, Authorization"
   );
 
-  // Le navigateur peut mettre le preflight en cache 24 h.
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
@@ -563,10 +469,7 @@ function parseAvatarUpload(req) {
     try {
       bb = busboy({
         headers: req.headers,
-        limits: {
-          fileSize: MAX_AVATAR_SIZE,
-          files: 1,
-        },
+        limits: { fileSize: MAX_AVATAR_SIZE, files: 1 },
       });
     } catch (initError) {
       reject(initError);
@@ -592,9 +495,7 @@ function parseAvatarUpload(req) {
 
       const chunks = [];
 
-      file.on("data", (chunk) => {
-        chunks.push(chunk);
-      });
+      file.on("data", (chunk) => chunks.push(chunk));
 
       file.on("limit", () => {
         fileTooLarge = true;
@@ -605,9 +506,7 @@ function parseAvatarUpload(req) {
       });
     });
 
-    bb.on("field", () => {
-      // On ignore les autres champs.
-    });
+    bb.on("field", () => {});
 
     bb.on("close", () => {
       if (fileTooLarge) {
@@ -620,11 +519,7 @@ function parseAvatarUpload(req) {
         return;
       }
 
-      resolve({
-        buffer: fileBuffer,
-        fileName,
-        mimeType,
-      });
+      resolve({ buffer: fileBuffer, fileName, mimeType });
     });
 
     bb.on("error", (error) => {
@@ -640,7 +535,6 @@ function extractAvatarStoragePath(filePathOrUrl) {
   const markerIndex = filePathOrUrl.indexOf(marker);
 
   if (markerIndex !== -1) {
-    // On retire aussi un éventuel query string (?t=...)
     const raw = filePathOrUrl.slice(markerIndex + marker.length).split("?")[0];
 
     try {
@@ -657,9 +551,6 @@ function extractAvatarStoragePath(filePathOrUrl) {
   return null;
 }
 
-// Vérifie que le fichier appartient bien à l'utilisateur
-// (chemin de la forme "<user.id>/<fichier>") et n'essaie pas
-// de remonter dans l'arborescence.
 function isOwnedAvatarPath(storagePath, userId) {
   if (typeof storagePath !== "string") return false;
   if (storagePath.includes("..")) return false;
@@ -671,10 +562,6 @@ function isOwnedAvatarPath(storagePath, userId) {
 // ============================================================
 // RESPONSE
 // ============================================================
-//
-// Les headers CORS sont posés avec res.setHeader() au tout début de
-// chaque requête : res.writeHead() les conserve, donc toutes les
-// réponses (succès, 4xx, 5xx, 404) portent les headers CORS.
 
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
@@ -729,30 +616,12 @@ async function getAuthenticatedUser(req) {
     };
   }
 
-  return {
-    user,
-    token,
-    error: null,
-    code: null,
-  };
+  return { user, token, error: null, code: null };
 }
 
 // ============================================================
 // NORMALISATION UTILISATEUR
 // ============================================================
-//
-// AVATAR : Supabase écrase `user_metadata.avatar_url` à CHAQUE
-// connexion Google (il mappe le champ `picture` de Google vers
-// `avatar_url`). Idem pour GitHub (`avatar_url`). On stocke donc
-// la photo choisie par l'utilisateur dans une clé protégée
-// `custom_avatar_url` qui n'est jamais touchée par l'OAuth, et on
-// la lit en priorité.
-//
-// Priorité :  custom_avatar_url  >  avatar_url  >  picture
-//
-// Si `custom_avatar_url` est une string (même vide), on l'utilise
-// telle quelle, ce qui permet aussi de "supprimer" l'avatar sans
-// que la photo du provider ne réapparaisse.
 
 function resolveAvatar(metadata) {
   if (typeof metadata.custom_avatar_url === "string") {
@@ -863,13 +732,8 @@ async function syncSubscriptionToUser(userId, subscription) {
 }
 
 // ============================================================
-// STATE OAUTH SIGNÉ (TikTok + Pinterest, stateless, anti-CSRF)
+// STATE OAUTH SIGNÉ
 // ============================================================
-//
-// Le state contient le provider, l'id utilisateur, une expiration
-// (10 min) et un aléa, le tout signé en HMAC. Le provider est inclus
-// dans la signature : un state TikTok ne peut pas être rejoué sur
-// Pinterest, et inversement.
 
 function hmac(value) {
   return crypto
@@ -942,12 +806,10 @@ async function tiktokApi(
 
   const data = await response.json().catch(() => ({}));
 
-  // Format des endpoints /v2/oauth/* : { error: "invalid_grant", error_description }
   if (typeof data.error === "string") {
     throw new Error(data.error_description || data.error);
   }
 
-  // Format des autres endpoints : { error: { code: "ok" | "...", message } }
   if (data.error?.code && data.error.code !== "ok") {
     const err = new Error(data.error.message || data.error.code);
     err.tiktokCode = data.error.code;
@@ -960,9 +822,6 @@ async function tiktokApi(
 // ============================================================
 // TIKTOK — STOCKAGE / REFRESH DES TOKENS
 // ============================================================
-//
-// Les tokens sont stockés dans la table `tiktok_accounts`
-// (RLS activé, aucune policy : seul le service role y accède).
 
 async function saveTikTokTokens(userId, t, extra = {}) {
   const now = Date.now();
@@ -997,7 +856,6 @@ async function getTikTokAccount(userId) {
   return data || null;
 }
 
-// Retourne un access_token valide (le rafraîchit si nécessaire).
 async function getValidTikTokToken(userId) {
   const account = await getTikTokAccount(userId);
 
@@ -1095,8 +953,6 @@ function parseVideoUpload(req) {
   });
 }
 
-// Règles TikTok : chunk entre 5 et 64 Mo, le dernier chunk peut
-// absorber le reste. Sous 64 Mo, un seul chunk suffit.
 function computeChunking(size) {
   const MB = 1024 * 1024;
 
@@ -1157,19 +1013,17 @@ function sendTikTokError(res, error) {
 // ============================================================
 // PINTEREST — APPEL API
 // ============================================================
-//
-// - `base`  : PINTEREST_API_BASE (sandbox par défaut) ou
-//             PINTEREST_OAUTH_BASE pour les endpoints /oauth/token
-// - `basic` : true pour l'authentification Basic app_id:app_secret
-//             (requise par /oauth/token)
-//
-// Pinterest renvoie les erreurs sous la forme { code, message }
-// avec un statut HTTP non 2xx ; les erreurs OAuth peuvent aussi
-// utiliser { error, error_description }.
 
 async function pinterestApi(
   pathname,
-  { method = "GET", base = PINTEREST_API_BASE, token, basic = false, form, json } = {}
+  {
+    method = "GET",
+    base = PINTEREST_API_BASE,
+    token,
+    basic = false,
+    form,
+    json,
+  } = {}
 ) {
   const headers = { Accept: "application/json" };
   let body;
@@ -1218,14 +1072,10 @@ async function pinterestApi(
 // ============================================================
 // PINTEREST — STOCKAGE / REFRESH DES TOKENS
 // ============================================================
-//
-// Les tokens sont stockés dans la table `pinterest_accounts`
-// (RLS activé, aucune policy : seul le service role y accède).
 
 async function savePinterestTokens(userId, t, extra = {}) {
   const now = Date.now();
 
-  // access_token : ~30 jours. refresh_token : ~1 an.
   const accessTtl = Number(t.expires_in) || 30 * 24 * 60 * 60;
   const refreshTtl =
     Number(t.refresh_token_expires_in) || 365 * 24 * 60 * 60;
@@ -1257,8 +1107,6 @@ async function getPinterestAccount(userId) {
   return data || null;
 }
 
-// Retourne un access_token valide (le rafraîchit si nécessaire).
-// Pas encore utilisé par une route : prêt pour la publication de pins.
 async function getValidPinterestToken(userId) {
   const account = await getPinterestAccount(userId);
 
@@ -1290,7 +1138,6 @@ async function getValidPinterestToken(userId) {
     },
   });
 
-  // Si Pinterest ne renvoie pas de nouveau refresh_token, on garde l'ancien.
   await savePinterestTokens(userId, {
     ...refreshed,
     refresh_token: refreshed.refresh_token || account.refresh_token,
@@ -1310,13 +1157,6 @@ function sendPinterestError(res, error) {
 // ============================================================
 // YOUTUBE — APPEL API GOOGLE
 // ============================================================
-//
-// Utilisé pour les endpoints OAuth (token, revoke) et pour l'API
-// YouTube Data v3.
-//
-// Formats d'erreur Google :
-//   - OAuth : { error: "invalid_grant", error_description: "..." }
-//   - API   : { error: { code, message, errors: [...] } }
 
 async function googleRequest(
   requestUrl,
@@ -1356,10 +1196,9 @@ async function googleRequest(
   return data;
 }
 
-// Chaîne YouTube du compte Google connecté (ou null si le compte n'en a pas).
 async function fetchYouTubeChannel(accessToken) {
   const data = await googleRequest(
-    `${YOUTUBE_API_BASE}/channels?part=snippet&mine=true`,
+    `${YOUTUBE_API_BASE}/channels?part=snippet,statistics&mine=true`,
     { token: accessToken }
   );
 
@@ -1367,6 +1206,7 @@ async function fetchYouTubeChannel(accessToken) {
   if (!channel) return null;
 
   const thumbnails = channel.snippet?.thumbnails || {};
+  const stats = channel.statistics || {};
 
   return {
     id: channel.id,
@@ -1377,20 +1217,15 @@ async function fetchYouTubeChannel(accessToken) {
       thumbnails.medium?.url ||
       thumbnails.default?.url ||
       null,
+    subscriberCount: Number(stats.subscriberCount) || 0,
+    videoCount: Number(stats.videoCount) || 0,
+    viewCount: Number(stats.viewCount) || 0,
   };
 }
 
 // ============================================================
 // YOUTUBE — STOCKAGE / REFRESH DES TOKENS
 // ============================================================
-//
-// Les tokens sont stockés dans la table `youtube_accounts`
-// (RLS activé, aucune policy : seul le service role y accède).
-//
-// - access_token : ~1 h
-// - refresh_token : sans expiration, SAUF si l'écran de consentement
-//   est en mode "Testing" (7 jours) : Google renvoie alors
-//   refresh_token_expires_in, que l'on mémorise.
 
 async function saveYouTubeTokens(userId, t, extra = {}) {
   const now = Date.now();
@@ -1407,7 +1242,6 @@ async function saveYouTubeTokens(userId, t, extra = {}) {
   if (t.refresh_token) row.refresh_token = t.refresh_token;
   if (t.scope) row.scope = t.scope;
 
-  // undefined = ne pas toucher (cas du refresh) ; null / nombre = on écrit.
   if (t.refresh_token_expires_in !== undefined) {
     row.refresh_expires_at = t.refresh_token_expires_in
       ? new Date(now + Number(t.refresh_token_expires_in) * 1000).toISOString()
@@ -1431,8 +1265,6 @@ async function getYouTubeAccount(userId) {
   return data || null;
 }
 
-// Retourne un access_token valide (le rafraîchit si nécessaire).
-// Pas encore utilisé par une route : prêt pour la publication de vidéos.
 async function getValidYouTubeToken(userId) {
   const account = await getYouTubeAccount(userId);
 
@@ -1471,7 +1303,6 @@ async function getValidYouTubeToken(userId) {
       },
     });
   } catch (refreshError) {
-    // invalid_grant : token révoqué par l'utilisateur ou expiré (mode Testing).
     if (refreshError.googleError === "invalid_grant") {
       const err = new Error("YouTube session expired, please reconnect");
       err.statusCode = 401;
@@ -1495,6 +1326,222 @@ function sendYouTubeError(res, error) {
 }
 
 // ============================================================
+// STATS — RÉCUPÉRATION DES ABONNÉS PAR RÉSEAU
+// ============================================================
+//
+// Chaque helper retourne un entier (0 si non connecté), ou `null`
+// si la récupération échoue pour une raison temporaire (token
+// expiré, API indisponible, scope manquant…). On distingue :
+//   - null : on ne peut PAS connaître la valeur (le provider est
+//            ignoré du total et du delta).
+//   - 0    : la valeur est bien 0 (rare, mais possible).
+
+async function fetchTikTokFollowerCount(userId) {
+  try {
+    const accessToken = await getValidTikTokToken(userId);
+
+    // user.info.stats est requis pour follower_count.
+    const data = await tiktokApi(
+      "/v2/user/info/?fields=open_id,display_name,avatar_url,follower_count,following_count,likes_count",
+      { method: "GET", token: accessToken }
+    );
+
+    const user = data.data?.user || {};
+    const count = Number(user.follower_count);
+
+    return Number.isFinite(count) ? count : 0;
+  } catch (error) {
+    // TIKTOK_NOT_CONNECTED : normal, on ignore silencieusement.
+    if (error.code === "TIKTOK_NOT_CONNECTED") return null;
+
+    console.warn("TikTok follower count error:", error.message);
+    return null;
+  }
+}
+
+async function fetchPinterestFollowerCount(userId) {
+  try {
+    const account = await getPinterestAccount(userId);
+    if (!account) return null;
+
+    const accessToken = await getValidPinterestToken(userId);
+
+    const profile = await pinterestApi("/user_account", {
+      token: accessToken,
+    });
+
+    const count = Number(profile.follower_count);
+
+    return Number.isFinite(count) ? count : 0;
+  } catch (error) {
+    if (error.code === "PINTEREST_NOT_CONNECTED") return null;
+
+    console.warn("Pinterest follower count error:", error.message);
+    return null;
+  }
+}
+
+async function fetchYouTubeSubscriberCount(userId) {
+  try {
+    const account = await getYouTubeAccount(userId);
+    if (!account) return null;
+
+    const accessToken = await getValidYouTubeToken(userId);
+
+    const data = await googleRequest(
+      `${YOUTUBE_API_BASE}/channels?part=statistics&mine=true`,
+      { token: accessToken }
+    );
+
+    const stats = data.items?.[0]?.statistics || {};
+    const count = Number(stats.subscriberCount);
+
+    return Number.isFinite(count) ? count : 0;
+  } catch (error) {
+    if (error.code === "YOUTUBE_NOT_CONNECTED") return null;
+
+    console.warn("YouTube subscriber count error:", error.message);
+    return null;
+  }
+}
+
+// ============================================================
+// STATS — SNAPSHOTS QUOTIDIENS
+// ============================================================
+//
+// Table attendue (à créer une fois dans Supabase) :
+//
+//   create table if not exists follower_snapshots (
+//     id bigserial primary key,
+//     user_id uuid not null references auth.users(id) on delete cascade,
+//     provider text not null,
+//     followers integer not null default 0,
+//     snapshot_date date not null default current_date,
+//     created_at timestamptz not null default now(),
+//     unique (user_id, provider, snapshot_date)
+//   );
+//
+//   create index if not exists follower_snapshots_lookup
+//     on follower_snapshots (user_id, provider, snapshot_date desc);
+//
+//   alter table follower_snapshots enable row level security;
+//   -- aucune policy : seul le service role y accède.
+
+const SNAPSHOT_DAYS_WINDOW = 7;
+
+async function saveFollowerSnapshot(userId, provider, followers) {
+  if (!Number.isFinite(followers)) return;
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  const { error } = await supabaseAdmin.from("follower_snapshots").upsert(
+    {
+      user_id: userId,
+      provider,
+      followers,
+      snapshot_date: today,
+    },
+    { onConflict: "user_id,provider,snapshot_date" }
+  );
+
+  if (error) {
+    // Table absente ou autre : on n'empêche pas la réponse.
+    console.warn("saveFollowerSnapshot warning:", error.message);
+  }
+}
+
+async function getFollowerSnapshotDaysAgo(
+  userId,
+  provider,
+  days = SNAPSHOT_DAYS_WINDOW
+) {
+  // On cherche le snapshot le plus récent qui a AU MOINS `days` jours.
+  // Si on n'en trouve pas, on retourne null : le delta sera null.
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+
+  const cutoffIso = cutoff.toISOString().slice(0, 10);
+
+  const { data, error } = await supabaseAdmin
+    .from("follower_snapshots")
+    .select("followers, snapshot_date")
+    .eq("user_id", userId)
+    .eq("provider", provider)
+    .lte("snapshot_date", cutoffIso)
+    .order("snapshot_date", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("getFollowerSnapshotDaysAgo warning:", error.message);
+    return null;
+  }
+
+  if (!data) return null;
+
+  const value = Number(data.followers);
+  return Number.isFinite(value) ? value : null;
+}
+
+// ============================================================
+// STATS — AGRÉGATION
+// ============================================================
+
+async function collectFollowerStats(userId) {
+  const providers = [
+    { name: "tiktok", fetcher: fetchTikTokFollowerCount },
+    { name: "pinterest", fetcher: fetchPinterestFollowerCount },
+    { name: "youtube", fetcher: fetchYouTubeSubscriberCount },
+  ];
+
+  const results = [];
+
+  // On lance les 3 fetchs en parallèle.
+  const settled = await Promise.allSettled(
+    providers.map((p) => p.fetcher(userId))
+  );
+
+  for (let i = 0; i < providers.length; i++) {
+    const provider = providers[i].name;
+    const outcome = settled[i];
+
+    if (outcome.status !== "fulfilled" || outcome.value === null) {
+      // Non connecté ou erreur : on ignore ce provider.
+      continue;
+    }
+
+    const followers = outcome.value;
+
+    // Snapshot du jour (idempotent : écrase la valeur du jour).
+    await saveFollowerSnapshot(userId, provider, followers);
+
+    // Valeur ~7 jours plus tôt.
+    const past = await getFollowerSnapshotDaysAgo(
+      userId,
+      provider,
+      SNAPSHOT_DAYS_WINDOW
+    );
+
+    const delta = past === null ? null : followers - past;
+
+    results.push({ provider, followers, delta });
+  }
+
+  const total = results.reduce((sum, r) => sum + r.followers, 0);
+
+  // Delta global : uniquement si TOUS les providers présents ont un delta.
+  // Sinon null (on ne veut pas d'un total faussé par une donnée manquante).
+  const allHaveDelta =
+    results.length > 0 && results.every((r) => r.delta !== null);
+
+  const delta = allHaveDelta
+    ? results.reduce((sum, r) => sum + (r.delta || 0), 0)
+    : null;
+
+  return { total, delta, providers: results };
+}
+
+// ============================================================
 // SERVER
 // ============================================================
 
@@ -1502,10 +1549,6 @@ const server = createServer(async (req, res) => {
   // ----------------------------------------------------------
   // CORS — TOUJOURS EN PREMIER
   // ----------------------------------------------------------
-  //
-  // Exécuté avant toute lecture de body, toute authentification et
-  // toute route : aucune exception de la logique métier ne peut
-  // survenir avant que les headers CORS soient posés.
 
   try {
     setCorsHeaders(req, res);
@@ -1514,11 +1557,8 @@ const server = createServer(async (req, res) => {
   }
 
   // ----------------------------------------------------------
-  // PREFLIGHT (OPTIONS) — répondu immédiatement
+  // PREFLIGHT (OPTIONS)
   // ----------------------------------------------------------
-  //
-  // Un OPTIONS n'atteint jamais les routes, l'authentification
-  // ni le 404.
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, { "Content-Length": "0" });
@@ -1527,14 +1567,6 @@ const server = createServer(async (req, res) => {
   }
 
   try {
-    // ----------------------------------------------------------
-    // URL
-    // ----------------------------------------------------------
-    //
-    // Le host de la requête est fourni correctement par Railway
-    // (ex. stoneserv-production.up.railway.app). Il ne sert ici
-    // qu'à parser le chemin et les paramètres.
-
     const url = new URL(
       req.url || "/",
       `http://${req.headers.host || `localhost:${PORT}`}`
@@ -1603,10 +1635,7 @@ const server = createServer(async (req, res) => {
       });
 
       if (error) {
-        sendJson(res, 400, {
-          success: false,
-          error: error.message,
-        });
+        sendJson(res, 400, { success: false, error: error.message });
         return;
       }
 
@@ -1651,10 +1680,7 @@ const server = createServer(async (req, res) => {
       });
 
       if (error) {
-        sendJson(res, 401, {
-          success: false,
-          error: error.message,
-        });
+        sendJson(res, 401, { success: false, error: error.message });
         return;
       }
 
@@ -1673,7 +1699,7 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // AUTH — CHECK EMAIL VERIFICATION (polling sans 401)
+    // AUTH — CHECK EMAIL VERIFICATION
     // ==========================================================
 
     if (
@@ -1761,11 +1787,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      sendJson(res, 200, {
-        success: true,
-        url: data.url,
-      });
-
+      sendJson(res, 200, { success: true, url: data.url });
       return;
     }
 
@@ -1807,11 +1829,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      sendJson(res, 200, {
-        success: true,
-        url: data.url,
-      });
-
+      sendJson(res, 200, { success: true, url: data.url });
       return;
     }
 
@@ -1906,10 +1924,7 @@ const server = createServer(async (req, res) => {
       });
 
       if (resendError) {
-        sendJson(res, 500, {
-          success: false,
-          error: resendError.message,
-        });
+        sendJson(res, 500, { success: false, error: resendError.message });
         return;
       }
 
@@ -1933,11 +1948,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      sendJson(res, 200, {
-        success: true,
-        user: formatUser(user),
-      });
-
+      sendJson(res, 200, { success: true, user: formatUser(user) });
       return;
     }
 
@@ -1953,21 +1964,13 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      sendJson(res, 200, {
-        success: true,
-        user: formatUser(user),
-      });
-
+      sendJson(res, 200, { success: true, user: formatUser(user) });
       return;
     }
 
     // ==========================================================
     // USER PROFILE — UPDATE
     // ==========================================================
-    //
-    // IMPORTANT : on écrit l'avatar dans `custom_avatar_url` (clé
-    // custom, jamais touchée par l'OAuth) au lieu de `avatar_url`
-    // (que Supabase écrase à chaque login Google/GitHub).
 
     if (
       (req.method === "PUT" || req.method === "PATCH") &&
@@ -1984,10 +1987,7 @@ const server = createServer(async (req, res) => {
 
       const metadata = { ...(user.user_metadata || {}) };
 
-      if (
-        body.firstName !== undefined ||
-        body.first_name !== undefined
-      ) {
+      if (body.firstName !== undefined || body.first_name !== undefined) {
         metadata.first_name = String(
           body.firstName ?? body.first_name ?? ""
         );
@@ -2001,7 +2001,6 @@ const server = createServer(async (req, res) => {
         metadata.bio = String(body.bio);
       }
 
-      // ⚠️ Écrit dans custom_avatar_url, PAS dans avatar_url.
       if (body.avatarUrl !== undefined || body.avatar_url !== undefined) {
         metadata.custom_avatar_url = String(
           body.avatarUrl ?? body.avatar_url ?? ""
@@ -2021,11 +2020,7 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      sendJson(res, 200, {
-        success: true,
-        user: formatUser(data.user),
-      });
-
+      sendJson(res, 200, { success: true, user: formatUser(data.user) });
       return;
     }
 
@@ -2184,9 +2179,6 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // USER AVATAR — DELETE
     // ==========================================================
-    //
-    // SÉCURITÉ : on ne supprime que les fichiers situés dans le
-    // dossier de l'utilisateur authentifié (`<user.id>/...`).
 
     if (req.method === "DELETE" && url.pathname === "/api/user/avatar") {
       const { user, token, error, code } = await getAuthenticatedUser(req);
@@ -2210,8 +2202,6 @@ const server = createServer(async (req, res) => {
 
       const storagePath = extractAvatarStoragePath(filePathOrUrl);
 
-      // URL externe (avatar Google/GitHub) : rien à supprimer
-      // dans notre bucket.
       if (!storagePath) {
         sendJson(res, 200, { success: true });
         return;
@@ -2238,6 +2228,50 @@ const server = createServer(async (req, res) => {
       }
 
       sendJson(res, 200, { success: true });
+      return;
+    }
+
+    // ==========================================================
+    // STATS — FOLLOWERS (agrégé, tous réseaux confondus)
+    // ==========================================================
+    //
+    // GET /api/stats/followers
+    //
+    // Retourne :
+    //   {
+    //     total: number,
+    //     delta: number | null,       // variation sur 7 jours
+    //     providers: [
+    //       { provider: "tiktok",    followers, delta },
+    //       { provider: "pinterest", followers, delta },
+    //       { provider: "youtube",   followers, delta },
+    //     ]
+    //   }
+    //
+    // - Les providers non connectés sont ignorés.
+    // - Un snapshot est enregistré chaque jour (upsert) pour pouvoir
+    //   calculer le delta 7 jours plus tard.
+    // - `delta` est null tant qu'aucun snapshot ≥ 7 jours n'existe.
+
+    if (req.method === "GET" && url.pathname === "/api/stats/followers") {
+      const { user, error, code } = await getAuthenticatedUser(req);
+
+      if (!user) {
+        sendJson(res, 401, { success: false, error, code });
+        return;
+      }
+
+      try {
+        const stats = await collectFollowerStats(user.id);
+        sendJson(res, 200, stats);
+      } catch (statsError) {
+        console.error("collectFollowerStats error:", statsError);
+        sendJson(res, 500, {
+          success: false,
+          error: "Could not compute follower stats",
+        });
+      }
+
       return;
     }
 
@@ -2311,7 +2345,7 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // STRIPE — PORTAIL CLIENT (gérer / annuler l'abonnement)
+    // STRIPE — PORTAIL CLIENT
     // ==========================================================
 
     if (req.method === "POST" && url.pathname === "/api/stripe/portal") {
@@ -2421,12 +2455,6 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // STRIPE — WEBHOOK
     // ==========================================================
-    //
-    // URL à configurer dans le dashboard Stripe :
-    // https://stoneserv-production.up.railway.app/api/stripe/webhook
-    //
-    // Les webhooks viennent des serveurs Stripe (pas d'en-tête Origin) :
-    // ils ne sont pas concernés par CORS, seule la signature compte.
 
     if (req.method === "POST" && url.pathname === "/api/stripe/webhook") {
       if (!stripe || !STRIPE_WEBHOOK_SECRET) {
@@ -2522,7 +2550,6 @@ const server = createServer(async (req, res) => {
           }
 
           default:
-            // Événement ignoré
             break;
         }
       } catch (handlerError) {
@@ -2576,12 +2603,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // TIKTOK — CALLBACK (échange code -> tokens)
+    // TIKTOK — CALLBACK
     // ==========================================================
-    //
-    // Appelé par le frontend (TikTokCallback.tsx) avec { code, state }
-    // récupérés depuis sessionStorage après l'interception de
-    // /tiktok/callback?code=...&state=... par App.tsx.
 
     if (req.method === "POST" && url.pathname === "/api/tiktok/auth/callback") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -2613,12 +2636,11 @@ const server = createServer(async (req, res) => {
           },
         });
 
-        // Profil TikTok (scope user.info.basic)
         let profile = {};
 
         try {
           const info = await tiktokApi(
-            "/v2/user/info/?fields=open_id,avatar_url,display_name",
+            "/v2/user/info/?fields=open_id,avatar_url,display_name,follower_count,following_count,likes_count",
             { method: "GET", token: tokens.access_token }
           );
 
@@ -2631,6 +2653,15 @@ const server = createServer(async (req, res) => {
           display_name: profile.display_name || null,
           avatar_url: profile.avatar_url || null,
         });
+
+        // Snapshot immédiat pour ne pas perdre le premier jour.
+        if (Number.isFinite(Number(profile.follower_count))) {
+          await saveFollowerSnapshot(
+            user.id,
+            "tiktok",
+            Number(profile.follower_count)
+          );
+        }
 
         sendJson(res, 200, {
           success: true,
@@ -2647,7 +2678,7 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // TIKTOK — STATUT DE LA CONNEXION
+    // TIKTOK — STATUT
     // ==========================================================
 
     if (req.method === "GET" && url.pathname === "/api/tiktok/status") {
@@ -2713,11 +2744,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // TIKTOK — INFOS CRÉATEUR (privacy options, durée max...)
+    // TIKTOK — INFOS CRÉATEUR
     // ==========================================================
-    //
-    // À appeler avant d'afficher le formulaire de publication :
-    // privacy_level_options liste les valeurs autorisées.
 
     if (req.method === "GET" && url.pathname === "/api/tiktok/creator-info") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -2744,16 +2772,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // TIKTOK — PUBLIER UNE VIDÉO (upload de fichier)
+    // TIKTOK — PUBLIER UNE VIDÉO (upload)
     // ==========================================================
-    //
-    // multipart/form-data :
-    //   video          (fichier)  mp4 / mov / webm
-    //   mode           "direct" (video.publish) | "draft" (video.upload)
-    //   title          légende (direct uniquement)
-    //   privacy_level  PUBLIC_TO_EVERYONE | MUTUAL_FOLLOW_FRIENDS |
-    //                  FOLLOWER_OF_CREATOR | SELF_ONLY
-    //   disable_comment / disable_duet / disable_stitch  "true" | "false"
 
     if (req.method === "POST" && url.pathname === "/api/tiktok/publish") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -2834,12 +2854,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // TIKTOK — PUBLIER UNE VIDÉO DEPUIS UNE URL
+    // TIKTOK — PUBLIER DEPUIS UNE URL
     // ==========================================================
-    //
-    // JSON : { mode, videoUrl, title, privacy_level, ... }
-    // ⚠️ Le domaine de videoUrl doit être vérifié dans le portail
-    // TikTok for Developers (URL properties).
 
     if (req.method === "POST" && url.pathname === "/api/tiktok/publish/url") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -2923,8 +2939,6 @@ const server = createServer(async (req, res) => {
           json: { publish_id: publishId },
         });
 
-        // status : PROCESSING_UPLOAD | PROCESSING_DOWNLOAD |
-        //          SEND_TO_USER_INBOX | PUBLISH_COMPLETE | FAILED
         sendJson(res, 200, { success: true, ...result.data });
       } catch (tiktokError) {
         sendTikTokError(res, tiktokError);
@@ -2974,12 +2988,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // PINTEREST — CALLBACK (échange code -> tokens)
+    // PINTEREST — CALLBACK
     // ==========================================================
-    //
-    // Appelé par le frontend (PinterestCallback.tsx) avec { code, state }
-    // récupérés depuis sessionStorage après l'interception de
-    // /pinterest/callback?code=...&state=... par App.tsx.
 
     if (
       req.method === "POST" &&
@@ -3015,8 +3025,6 @@ const server = createServer(async (req, res) => {
           },
         });
 
-        // Profil Pinterest (scope user_accounts:read).
-        // Non bloquant : en sandbox, le profil peut être incomplet.
         let profile = {};
 
         try {
@@ -3032,6 +3040,14 @@ const server = createServer(async (req, res) => {
           avatar_url: profile.profile_image || null,
           account_type: profile.account_type || null,
         });
+
+        if (Number.isFinite(Number(profile.follower_count))) {
+          await saveFollowerSnapshot(
+            user.id,
+            "pinterest",
+            Number(profile.follower_count)
+          );
+        }
 
         sendJson(res, 200, {
           success: true,
@@ -3050,12 +3066,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // PINTEREST — CONNEXION PAR TOKEN MANUEL (DEV / SANDBOX)
+    // PINTEREST — TOKEN MANUEL (DEV / SANDBOX)
     // ==========================================================
-    //
-    // Permet de tester sans redirect URI : on colle un access token
-    // généré dans le portail développeur Pinterest.
-    // Désactivé par défaut : PINTEREST_ALLOW_MANUAL_TOKEN=1 pour l'activer.
 
     if (req.method === "POST" && url.pathname === "/api/pinterest/auth/token") {
       if (env("PINTEREST_ALLOW_MANUAL_TOKEN") !== "1") {
@@ -3094,7 +3106,6 @@ const server = createServer(async (req, res) => {
       }
 
       try {
-        // Pas de refresh token : le compte devra être reconnecté à l'expiration.
         await savePinterestTokens(
           user.id,
           {
@@ -3128,7 +3139,7 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // PINTEREST — STATUT DE LA CONNEXION
+    // PINTEREST — STATUT
     // ==========================================================
 
     if (req.method === "GET" && url.pathname === "/api/pinterest/status") {
@@ -3160,9 +3171,6 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // PINTEREST — DÉCONNEXION
     // ==========================================================
-    //
-    // On supprime simplement les tokens stockés (pas d'endpoint de
-    // révocation utilisé ici).
 
     if (
       req.method === "DELETE" &&
@@ -3204,9 +3212,6 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // YOUTUBE — URL D'AUTORISATION
     // ==========================================================
-    //
-    // access_type=offline + prompt=consent : garantit que Google
-    // renvoie un refresh_token à chaque connexion.
 
     if (req.method === "POST" && url.pathname === "/api/youtube/auth/url") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -3236,12 +3241,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // YOUTUBE — CALLBACK (échange code -> tokens)
+    // YOUTUBE — CALLBACK
     // ==========================================================
-    //
-    // Appelé par le frontend (YouTubeCallback.tsx) avec { code, state }
-    // récupérés depuis sessionStorage après l'interception de
-    // /youtube/callback?code=...&state=... par App.tsx.
 
     if (req.method === "POST" && url.pathname === "/api/youtube/auth/callback") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -3274,8 +3275,6 @@ const server = createServer(async (req, res) => {
           },
         });
 
-        // Chaîne YouTube : non bloquant si l'appel API échoue,
-        // mais un compte Google SANS chaîne est refusé.
         let channel = null;
         let channelLookupFailed = false;
 
@@ -3287,7 +3286,6 @@ const server = createServer(async (req, res) => {
         }
 
         if (!channelLookupFailed && !channel) {
-          // On révoque l'autorisation qui vient d'être donnée : elle est inutile.
           try {
             await googleRequest(GOOGLE_REVOKE_URL, {
               method: "POST",
@@ -3305,8 +3303,6 @@ const server = createServer(async (req, res) => {
           return;
         }
 
-        // Si Google ne renvoie pas de refresh_token, on garde l'ancien (saveYouTubeTokens
-        // n'écrase pas refresh_token quand il est absent).
         await saveYouTubeTokens(
           user.id,
           {
@@ -3320,6 +3316,14 @@ const server = createServer(async (req, res) => {
             avatar_url: channel?.avatarUrl || null,
           }
         );
+
+        if (channel && Number.isFinite(channel.subscriberCount)) {
+          await saveFollowerSnapshot(
+            user.id,
+            "youtube",
+            channel.subscriberCount
+          );
+        }
 
         sendJson(res, 200, {
           success: true,
@@ -3337,7 +3341,7 @@ const server = createServer(async (req, res) => {
     }
 
     // ==========================================================
-    // YOUTUBE — STATUT DE LA CONNEXION
+    // YOUTUBE — STATUT
     // ==========================================================
 
     if (req.method === "GET" && url.pathname === "/api/youtube/status") {
@@ -3369,9 +3373,6 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // YOUTUBE — DÉCONNEXION
     // ==========================================================
-    //
-    // Révoque l'autorisation chez Google (best effort), puis supprime
-    // les tokens stockés.
 
     if (req.method === "DELETE" && url.pathname === "/api/youtube/disconnect") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -3419,8 +3420,6 @@ const server = createServer(async (req, res) => {
       method: req.method,
     });
   } catch (error) {
-    // Les headers CORS ont déjà été posés plus haut : cette réponse
-    // d'erreur reste lisible par le navigateur.
     if (!res.headersSent) {
       sendJson(res, 500, {
         success: false,
