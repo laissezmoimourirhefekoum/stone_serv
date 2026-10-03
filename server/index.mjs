@@ -107,8 +107,9 @@ const stripe = STRIPE_SECRET_KEY
 // CONFIGURATION TIKTOK
 // ============================================================
 //
-// ⚠️  user.info.stats est requis pour récupérer follower_count.
-//     Les utilisateurs déjà connectés doivent se reconnecter.
+// ⚠️  user.info.stats n'est PAS dans la liste par défaut car la
+//     plupart des apps n'y ont pas accès (invalid_scope sinon).
+//     Décommente-le dans TIKTOK_SCOPES si TikTok te l'a approuvé.
 
 const TIKTOK_CLIENT_KEY = env("TIKTOK_CLIENT_KEY");
 const TIKTOK_CLIENT_SECRET = env("TIKTOK_CLIENT_SECRET");
@@ -116,8 +117,7 @@ const TIKTOK_REDIRECT_URI =
   env("TIKTOK_REDIRECT_URI") || `${APP_URL}/tiktok/callback`;
 
 const TIKTOK_SCOPES =
-  env("TIKTOK_SCOPES") ||
-  "user.info.basic,video.publish,video.upload";
+  env("TIKTOK_SCOPES") || "user.info.basic,video.publish,video.upload";
 
 const TIKTOK_API = "https://open.tiktokapis.com";
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
@@ -557,6 +557,91 @@ function isOwnedAvatarPath(storagePath, userId) {
   if (storagePath.startsWith("/")) return false;
 
   return storagePath.startsWith(`${userId}/`);
+}
+
+// ============================================================
+// HELPER — MIRROR D'AVATAR EXTERNE VERS SUPABASE STORAGE
+// ============================================================
+//
+// TikTok / Pinterest / YouTube renvoient des URLs signées qui
+// expirent rapidement ou refusent le hot-linking. On télécharge
+// l'image et on la ré-héberge dans le bucket `avatars`, sous le
+// dossier de l'utilisateur. L'URL publique Supabase est stable.
+//
+// Retourne l'URL publique Supabase (string), ou null en cas d'échec.
+
+async function mirrorRemoteAvatar(userId, provider, remoteUrl) {
+  if (!remoteUrl || typeof remoteUrl !== "string") return null;
+
+  // Déjà hébergé chez nous ? rien à faire.
+  if (remoteUrl.includes("/storage/v1/object/public/")) return remoteUrl;
+
+  try {
+    const response = await fetch(remoteUrl, {
+      headers: {
+        // Certains CDN (TikTok) exigent un User-Agent.
+        "User-Agent": "Mozilla/5.0 (compatible; StoneBot/1.0)",
+        Accept: "image/*",
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `mirrorRemoteAvatar(${provider}): HTTP ${response.status}`
+      );
+      return null;
+    }
+
+    const contentType = response.headers.get("content-type") || "image/jpeg";
+
+    if (!contentType.startsWith("image/")) {
+      console.warn(`mirrorRemoteAvatar(${provider}): not an image`);
+      return null;
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+
+    if (arrayBuffer.byteLength > MAX_AVATAR_SIZE) {
+      console.warn(
+        `mirrorRemoteAvatar(${provider}): file too large (${arrayBuffer.byteLength} bytes)`
+      );
+      return null;
+    }
+
+    const extension = contentType.includes("png")
+      ? "png"
+      : contentType.includes("webp")
+      ? "webp"
+      : contentType.includes("gif")
+      ? "gif"
+      : "jpg";
+
+    const storagePath = `${userId}/${provider}-${crypto.randomUUID()}.${extension}`;
+
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from(AVATAR_BUCKET)
+      .upload(storagePath, Buffer.from(arrayBuffer), {
+        contentType,
+        upsert: true,
+      });
+
+    if (uploadError) {
+      console.warn(
+        `mirrorRemoteAvatar(${provider}) upload:`,
+        uploadError.message
+      );
+      return null;
+    }
+
+    const { data } = supabaseAdmin.storage
+      .from(AVATAR_BUCKET)
+      .getPublicUrl(storagePath);
+
+    return data.publicUrl;
+  } catch (error) {
+    console.warn(`mirrorRemoteAvatar(${provider}):`, error.message);
+    return null;
+  }
 }
 
 // ============================================================
@@ -1328,30 +1413,26 @@ function sendYouTubeError(res, error) {
 // ============================================================
 // STATS — RÉCUPÉRATION DES ABONNÉS PAR RÉSEAU
 // ============================================================
-//
-// Chaque helper retourne un entier (0 si non connecté), ou `null`
-// si la récupération échoue pour une raison temporaire (token
-// expiré, API indisponible, scope manquant…). On distingue :
-//   - null : on ne peut PAS connaître la valeur (le provider est
-//            ignoré du total et du delta).
-//   - 0    : la valeur est bien 0 (rare, mais possible).
 
 async function fetchTikTokFollowerCount(userId) {
   try {
     const accessToken = await getValidTikTokToken(userId);
 
-    // user.info.stats est requis pour follower_count.
+    // Sans user.info.stats, follower_count n'est pas renvoyé.
+    // On tente quand même : si le scope est approuvé plus tard,
+    // ça marchera sans modification.
     const data = await tiktokApi(
-      "/v2/user/info/?fields=open_id,display_name,avatar_url,follower_count,following_count,likes_count",
+      "/v2/user/info/?fields=open_id,display_name,avatar_url,follower_count",
       { method: "GET", token: accessToken }
     );
 
     const user = data.data?.user || {};
     const count = Number(user.follower_count);
 
-    return Number.isFinite(count) ? count : 0;
+    if (!Number.isFinite(count)) return null;
+
+    return count;
   } catch (error) {
-    // TIKTOK_NOT_CONNECTED : normal, on ignore silencieusement.
     if (error.code === "TIKTOK_NOT_CONNECTED") return null;
 
     console.warn("TikTok follower count error:", error.message);
@@ -1425,7 +1506,6 @@ async function fetchYouTubeSubscriberCount(userId) {
 //     on follower_snapshots (user_id, provider, snapshot_date desc);
 //
 //   alter table follower_snapshots enable row level security;
-//   -- aucune policy : seul le service role y accède.
 
 const SNAPSHOT_DAYS_WINDOW = 7;
 
@@ -1445,7 +1525,6 @@ async function saveFollowerSnapshot(userId, provider, followers) {
   );
 
   if (error) {
-    // Table absente ou autre : on n'empêche pas la réponse.
     console.warn("saveFollowerSnapshot warning:", error.message);
   }
 }
@@ -1455,8 +1534,6 @@ async function getFollowerSnapshotDaysAgo(
   provider,
   days = SNAPSHOT_DAYS_WINDOW
 ) {
-  // On cherche le snapshot le plus récent qui a AU MOINS `days` jours.
-  // Si on n'en trouve pas, on retourne null : le delta sera null.
   const cutoff = new Date();
   cutoff.setUTCDate(cutoff.getUTCDate() - days);
 
@@ -1496,7 +1573,6 @@ async function collectFollowerStats(userId) {
 
   const results = [];
 
-  // On lance les 3 fetchs en parallèle.
   const settled = await Promise.allSettled(
     providers.map((p) => p.fetcher(userId))
   );
@@ -1506,16 +1582,13 @@ async function collectFollowerStats(userId) {
     const outcome = settled[i];
 
     if (outcome.status !== "fulfilled" || outcome.value === null) {
-      // Non connecté ou erreur : on ignore ce provider.
       continue;
     }
 
     const followers = outcome.value;
 
-    // Snapshot du jour (idempotent : écrase la valeur du jour).
     await saveFollowerSnapshot(userId, provider, followers);
 
-    // Valeur ~7 jours plus tôt.
     const past = await getFollowerSnapshotDaysAgo(
       userId,
       provider,
@@ -1529,8 +1602,6 @@ async function collectFollowerStats(userId) {
 
   const total = results.reduce((sum, r) => sum + r.followers, 0);
 
-  // Delta global : uniquement si TOUS les providers présents ont un delta.
-  // Sinon null (on ne veut pas d'un total faussé par une donnée manquante).
   const allHaveDelta =
     results.length > 0 && results.every((r) => r.delta !== null);
 
@@ -1546,19 +1617,11 @@ async function collectFollowerStats(userId) {
 // ============================================================
 
 const server = createServer(async (req, res) => {
-  // ----------------------------------------------------------
-  // CORS — TOUJOURS EN PREMIER
-  // ----------------------------------------------------------
-
   try {
     setCorsHeaders(req, res);
   } catch (corsError) {
     console.error("CORS error:", corsError);
   }
-
-  // ----------------------------------------------------------
-  // PREFLIGHT (OPTIONS)
-  // ----------------------------------------------------------
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, { "Content-Length": "0" });
@@ -2234,24 +2297,6 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     // STATS — FOLLOWERS (agrégé, tous réseaux confondus)
     // ==========================================================
-    //
-    // GET /api/stats/followers
-    //
-    // Retourne :
-    //   {
-    //     total: number,
-    //     delta: number | null,       // variation sur 7 jours
-    //     providers: [
-    //       { provider: "tiktok",    followers, delta },
-    //       { provider: "pinterest", followers, delta },
-    //       { provider: "youtube",   followers, delta },
-    //     ]
-    //   }
-    //
-    // - Les providers non connectés sont ignorés.
-    // - Un snapshot est enregistré chaque jour (upsert) pour pouvoir
-    //   calculer le delta 7 jours plus tard.
-    // - `delta` est null tant qu'aucun snapshot ≥ 7 jours n'existe.
 
     if (req.method === "GET" && url.pathname === "/api/stats/followers") {
       const { user, error, code } = await getAuthenticatedUser(req);
@@ -2640,7 +2685,7 @@ const server = createServer(async (req, res) => {
 
         try {
           const info = await tiktokApi(
-            "/v2/user/info/?fields=open_id,avatar_url,display_name,follower_count,following_count,likes_count",
+            "/v2/user/info/?fields=open_id,avatar_url,display_name,follower_count",
             { method: "GET", token: tokens.access_token }
           );
 
@@ -2649,12 +2694,20 @@ const server = createServer(async (req, res) => {
           console.warn("TikTok user info error:", profileError.message);
         }
 
+        // L'avatar TikTok est une URL signée qui expire vite et refuse
+        // le hot-linking : on la mirror dans notre storage.
+        const mirroredAvatar = await mirrorRemoteAvatar(
+          user.id,
+          "tiktok",
+          profile.avatar_url
+        );
+
         await saveTikTokTokens(user.id, tokens, {
           display_name: profile.display_name || null,
-          avatar_url: profile.avatar_url || null,
+          avatar_url: mirroredAvatar || profile.avatar_url || null,
         });
 
-        // Snapshot immédiat pour ne pas perdre le premier jour.
+        // Snapshot du jour uniquement si le scope donne follower_count.
         if (Number.isFinite(Number(profile.follower_count))) {
           await saveFollowerSnapshot(
             user.id,
@@ -2667,7 +2720,7 @@ const server = createServer(async (req, res) => {
           success: true,
           account: {
             display_name: profile.display_name || null,
-            avatar_url: profile.avatar_url || null,
+            avatar_url: mirroredAvatar || profile.avatar_url || null,
           },
         });
       } catch (tiktokError) {
@@ -3035,9 +3088,16 @@ const server = createServer(async (req, res) => {
           console.warn("Pinterest user_account error:", profileError.message);
         }
 
+        // Mirror de l'avatar Pinterest (URL Pinterest, pas Supabase).
+        const mirroredAvatar = await mirrorRemoteAvatar(
+          user.id,
+          "pinterest",
+          profile.profile_image
+        );
+
         await savePinterestTokens(user.id, tokens, {
           username: profile.username || null,
-          avatar_url: profile.profile_image || null,
+          avatar_url: mirroredAvatar || profile.profile_image || null,
           account_type: profile.account_type || null,
         });
 
@@ -3054,7 +3114,7 @@ const server = createServer(async (req, res) => {
           connected: true,
           account: {
             display_name: profile.username || null,
-            avatar_url: profile.profile_image || null,
+            avatar_url: mirroredAvatar || profile.profile_image || null,
             account_type: profile.account_type || null,
           },
         });
@@ -3105,6 +3165,12 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      const mirroredAvatar = await mirrorRemoteAvatar(
+        user.id,
+        "pinterest",
+        profile.profile_image
+      );
+
       try {
         await savePinterestTokens(
           user.id,
@@ -3116,7 +3182,7 @@ const server = createServer(async (req, res) => {
           },
           {
             username: profile.username || null,
-            avatar_url: profile.profile_image || null,
+            avatar_url: mirroredAvatar || profile.profile_image || null,
             account_type: profile.account_type || null,
           }
         );
@@ -3130,7 +3196,7 @@ const server = createServer(async (req, res) => {
         connected: true,
         account: {
           display_name: profile.username || null,
-          avatar_url: profile.profile_image || null,
+          avatar_url: mirroredAvatar || profile.profile_image || null,
           account_type: profile.account_type || null,
         },
       });
@@ -3303,6 +3369,13 @@ const server = createServer(async (req, res) => {
           return;
         }
 
+        // Mirror de l'avatar YouTube (yt3.ggpht.com, URLs Google).
+        const mirroredAvatar = await mirrorRemoteAvatar(
+          user.id,
+          "youtube",
+          channel?.avatarUrl
+        );
+
         await saveYouTubeTokens(
           user.id,
           {
@@ -3313,7 +3386,7 @@ const server = createServer(async (req, res) => {
             channel_id: channel?.id || null,
             channel_title: channel?.title || null,
             custom_url: channel?.customUrl || null,
-            avatar_url: channel?.avatarUrl || null,
+            avatar_url: mirroredAvatar || channel?.avatarUrl || null,
           }
         );
 
@@ -3330,7 +3403,7 @@ const server = createServer(async (req, res) => {
           connected: true,
           account: {
             display_name: channel?.title || null,
-            avatar_url: channel?.avatarUrl || null,
+            avatar_url: mirroredAvatar || channel?.avatarUrl || null,
           },
         });
       } catch (youtubeError) {
