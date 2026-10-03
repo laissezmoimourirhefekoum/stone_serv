@@ -117,7 +117,7 @@ const TIKTOK_REDIRECT_URI =
 
 const TIKTOK_SCOPES =
   env("TIKTOK_SCOPES") ||
-  "user.info.basic,user.info.stats,video.publish,video.upload";
+  "user.info.basic,video.publish,video.upload";
 
 const TIKTOK_API = "https://open.tiktokapis.com";
 const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
