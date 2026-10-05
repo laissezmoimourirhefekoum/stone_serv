@@ -19,12 +19,6 @@ const envPath = path.join(__dirname, ".env");
 // ============================================================
 // CHARGEMENT DU .env (robuste)
 // ============================================================
-//
-// - gère les fins de ligne CRLF (\r\n)
-// - retire les guillemets autour des valeurs
-// - n'écrase JAMAIS une variable déjà définie dans l'environnement
-//   (les variables de l'hébergeur ont la priorité)
-// - est toujours appelé : un .env absent n'est pas une erreur
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -43,7 +37,6 @@ function loadEnvFile(filePath) {
       const key = trimmed.slice(0, idx).trim();
       let value = trimmed.slice(idx + 1).trim();
 
-      // Retire les guillemets simples ou doubles autour de la valeur
       value = value.replace(/^(['"])(.*)\1$/, "$2");
 
       if (key && !(key in process.env)) {
@@ -62,16 +55,11 @@ function env(name) {
   return typeof value === "string" ? value.trim() : undefined;
 }
 
+const IS_PRODUCTION = env("NODE_ENV") === "production";
+
 // ============================================================
 // CONFIGURATION
 // ============================================================
-//
-// Backend public (Railway) : https://stoneserv-production.up.railway.app
-// Frontend (Vercel)        : https://stone-prod.vercel.app
-//
-// Le backend n'a pas besoin de connaître sa propre URL publique :
-// Railway fournit le host dans chaque requête.
-// Le port est TOUJOURS fourni par Railway via process.env.PORT.
 
 const PORT = Number(env("PORT") || 3002);
 
@@ -79,9 +67,6 @@ const SUPABASE_URL = env("SUPABASE_URL");
 const SUPABASE_ANON_KEY = env("SUPABASE_ANON_KEY");
 const SUPABASE_SERVICE_ROLE_KEY = env("SUPABASE_SERVICE_ROLE_KEY");
 
-// URL du FRONTEND vers laquelle l'utilisateur est renvoyé après
-// Google / GitHub OAuth. Le fallback localhost sert uniquement au
-// développement local.
 const DEFAULT_OAUTH_REDIRECT =
   env("OAUTH_REDIRECT_URL") || "http://localhost:5173/";
 
@@ -95,10 +80,6 @@ const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
 const STRIPE_SECRET_KEY = env("STRIPE_SECRET_KEY");
 const STRIPE_WEBHOOK_SECRET = env("STRIPE_WEBHOOK_SECRET");
 
-// URL du FRONTEND de production (ex. https://stone-prod.vercel.app).
-// Utilisée pour success_url, cancel_url et return_url Stripe, ainsi que
-// pour les redirect_uri TikTok et Pinterest par défaut.
-// Ce n'est JAMAIS l'URL Railway du backend.
 const APP_URL = (env("APP_URL") || "http://localhost:5173").replace(/\/+$/, "");
 
 const STRIPE_PRICES = {
@@ -123,14 +104,6 @@ const stripe = STRIPE_SECRET_KEY
 // ============================================================
 // CONFIGURATION TIKTOK
 // ============================================================
-//
-// TIKTOK_REDIRECT_URI doit être IDENTIQUE à l'URI déclarée dans
-// le portail TikTok for Developers. Elle pointe vers un VRAI chemin
-// du FRONTEND, sans "#" :
-//   https://stone-prod.vercel.app/tiktok/callback
-//
-// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
-// sur la route hash /#/tiktok-callback.
 
 const TIKTOK_CLIENT_KEY = env("TIKTOK_CLIENT_KEY");
 const TIKTOK_CLIENT_SECRET = env("TIKTOK_CLIENT_SECRET");
@@ -139,7 +112,7 @@ const TIKTOK_REDIRECT_URI =
 
 const TIKTOK_SCOPES = "user.info.basic,video.publish,video.upload";
 const TIKTOK_API = "https://open.tiktokapis.com";
-const MAX_VIDEO_SIZE = 100 * 1024 * 1024; // 100 Mo (le buffer est gardé en mémoire)
+const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
 const ALLOWED_VIDEO_TYPES = ["video/mp4", "video/quicktime", "video/webm"];
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
@@ -147,21 +120,6 @@ const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
 // ============================================================
 // CONFIGURATION PINTEREST
 // ============================================================
-//
-// PINTEREST_REDIRECT_URI doit être IDENTIQUE à l'URI déclarée dans
-// le dashboard développeur Pinterest. Comme pour TikTok, elle pointe
-// vers un VRAI chemin du FRONTEND, sans "#" :
-//   https://stone-prod.vercel.app/pinterest/callback
-//
-// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
-// sur la route hash /#/pinterest-callback.
-//
-// Deux base URLs :
-//   - PINTEREST_OAUTH_BASE : échange / rafraîchissement des tokens
-//                            (toujours api.pinterest.com)
-//   - PINTEREST_API_BASE   : appels API (user_account, boards, pins...)
-//                            sandbox par défaut (accès Trial).
-//                            En production : https://api.pinterest.com/v5
 
 const PINTEREST_APP_ID = env("PINTEREST_APP_ID");
 const PINTEREST_APP_SECRET = env("PINTEREST_APP_SECRET");
@@ -183,28 +141,14 @@ const PINTEREST_API_BASE = (
 const pinterestEnabled = Boolean(PINTEREST_APP_ID && PINTEREST_APP_SECRET);
 
 // ============================================================
-// CONFIGURATION YOUTUBE (Google OAuth 2.0)
+// CONFIGURATION YOUTUBE
 // ============================================================
-//
-// YOUTUBE_REDIRECT_URI doit être IDENTIQUE à l'une des "URI de
-// redirection autorisées" de ton client OAuth (Google Cloud Console).
-// Comme pour TikTok / Pinterest, elle pointe vers un VRAI chemin du
-// FRONTEND, sans "#" :
-//   https://stone-prod.vercel.app/youtube/callback
-//
-// Le frontend (App.tsx) intercepte ce chemin au chargement et bascule
-// sur la route hash /#/youtube-callback.
-//
-// Ce client OAuth est distinct de celui utilisé par Supabase pour le
-// "Se connecter avec Google" (même projet Google Cloud possible, mais
-// un client OAuth dédié est recommandé).
 
 const YOUTUBE_CLIENT_ID = env("YOUTUBE_CLIENT_ID");
 const YOUTUBE_CLIENT_SECRET = env("YOUTUBE_CLIENT_SECRET");
 const YOUTUBE_REDIRECT_URI =
   env("YOUTUBE_REDIRECT_URI") || `${APP_URL}/youtube/callback`;
 
-// Scopes séparés par des espaces ou des virgules.
 const YOUTUBE_SCOPES = (
   env("YOUTUBE_SCOPES") ||
   "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.upload"
@@ -221,17 +165,23 @@ const YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3";
 const youtubeEnabled = Boolean(YOUTUBE_CLIENT_ID && YOUTUBE_CLIENT_SECRET);
 
 // ============================================================
-// SECRET DE SIGNATURE DU STATE OAUTH (TikTok + Pinterest + YouTube)
+// SECRET DE SIGNATURE DU STATE OAUTH
 // ============================================================
-//
-// OAUTH_STATE_SECRET est optionnel : à défaut, on utilise le secret
-// TikTok, puis Pinterest, puis YouTube.
 
 const OAUTH_STATE_SECRET =
   env("OAUTH_STATE_SECRET") ||
   TIKTOK_CLIENT_SECRET ||
   PINTEREST_APP_SECRET ||
   YOUTUBE_CLIENT_SECRET;
+
+// ⚠️ En production, un secret de signature OAuth est OBLIGATOIRE :
+// les fallbacks (secrets clients OAuth) sont acceptables, mais un
+// secret dédié est fortement recommandé.
+if (IS_PRODUCTION && !env("OAUTH_STATE_SECRET")) {
+  console.warn(
+    "⚠️  OAUTH_STATE_SECRET manquant : définis un secret dédié (32+ caractères aléatoires) en production."
+  );
+}
 
 // ============================================================
 // VÉRIFICATION SUPABASE
@@ -258,7 +208,6 @@ if (missingVars.length > 0) {
   process.exit(1);
 }
 
-// Valide que SUPABASE_URL est une vraie URL http(s)
 try {
   const parsed = new URL(SUPABASE_URL);
 
@@ -292,6 +241,56 @@ if (env("DEBUG_ENV") === "1") {
   console.log("[env] YOUTUBE_SCOPES    :", JSON.stringify(YOUTUBE_SCOPES));
 }
 
+// ============================================================
+// FAIL-FAST EN PRODUCTION
+// ============================================================
+//
+// Sans APP_URL / OAUTH_REDIRECT_URL en production, les redirections
+// Stripe et OAuth pointeraient silencieusement vers localhost.
+// On refuse de démarrer plutôt que de servir des URLs cassées.
+
+if (IS_PRODUCTION) {
+  const fatalMissing = [];
+
+  if (!env("APP_URL") || APP_URL.startsWith("http://localhost")) {
+    fatalMissing.push("APP_URL (URL du frontend de production)");
+  }
+
+  if (
+    !env("OAUTH_REDIRECT_URL") ||
+    DEFAULT_OAUTH_REDIRECT.startsWith("http://localhost")
+  ) {
+    fatalMissing.push("OAUTH_REDIRECT_URL");
+  }
+
+  if (!OAUTH_STATE_SECRET) {
+    fatalMissing.push(
+      "OAUTH_STATE_SECRET (ou au moins un secret client OAuth)"
+    );
+  }
+
+  if (fatalMissing.length > 0) {
+    console.error("");
+    console.error("❌ Configuration de production incomplète :");
+    for (const name of fatalMissing) console.error(` - ${name}`);
+    console.error("");
+
+    process.exit(1);
+  }
+} else {
+  if (!env("APP_URL")) {
+    console.warn(
+      "⚠️  APP_URL manquant — fallback http://localhost:5173 (dev uniquement)."
+    );
+  }
+
+  if (!env("OAUTH_REDIRECT_URL")) {
+    console.warn(
+      "⚠️  OAUTH_REDIRECT_URL manquant — fallback http://localhost:5173/ (dev uniquement)."
+    );
+  }
+}
+
 if (!STRIPE_SECRET_KEY) {
   console.warn("⚠️  Stripe non configuré (STRIPE_SECRET_KEY manquant).");
 }
@@ -320,22 +319,18 @@ if (!youtubeEnabled) {
   );
 }
 
-// Un redirect_uri TikTok contenant un "#" est invalide (TikTok refuse
-// les fragments) : on prévient clairement au démarrage.
 if (TIKTOK_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  TIKTOK_REDIRECT_URI contient un "#" (${TIKTOK_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/tiktok/callback.`
   );
 }
 
-// Idem pour Pinterest : les fragments sont interdits dans une redirect URI OAuth.
 if (PINTEREST_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  PINTEREST_REDIRECT_URI contient un "#" (${PINTEREST_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/pinterest/callback.`
   );
 }
 
-// Idem pour YouTube / Google : les fragments sont interdits.
 if (YOUTUBE_REDIRECT_URI.includes("#")) {
   console.warn(
     `⚠️  YOUTUBE_REDIRECT_URI contient un "#" (${YOUTUBE_REDIRECT_URI}) — c'est invalide. Utilise https://<frontend>/youtube/callback.`
@@ -350,35 +345,13 @@ if (pinterestEnabled && PINTEREST_API_BASE.includes("sandbox")) {
   );
 }
 
-// Avertissements utiles en production (Railway) : sans ces variables,
-// les redirections Stripe et OAuth pointeraient vers localhost.
-if (!env("APP_URL")) {
-  console.warn(
-    "⚠️  APP_URL manquant — fallback http://localhost:5173 (à définir en production avec l'URL du frontend)."
-  );
-}
-
-if (!env("OAUTH_REDIRECT_URL")) {
-  console.warn(
-    "⚠️  OAUTH_REDIRECT_URL manquant — fallback http://localhost:5173/ (à définir en production avec l'URL du frontend)."
-  );
-}
-
 // ============================================================
-// CLIENT SUPABASE
+// CLIENTS SUPABASE
 // ============================================================
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// ============================================================
-// CLIENT SUPABASE ADMIN (Service Role)
-// ============================================================
-
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-// ============================================================
-// CLIENT SUPABASE OAUTH (flow implicite)
-// ============================================================
 
 const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -390,22 +363,96 @@ const supabaseOAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 // ============================================================
-// CORS (système unique)
+// RATE LIMITING (en mémoire, par IP)
 // ============================================================
 //
-// CORS concerne les origines des FRONTENDS qui appellent l'API.
-// L'URL Railway du backend n'est donc PAS ajoutée ici.
+// Simple sliding window par IP. Suffisant pour un backend Railway
+// mono-instance ; pour du multi-instance, passe à Redis (ioredis +
+// rate-limiter-flexible).
 //
-// Origines autorisées :
-//   1. les origines codées en dur ci-dessous (dev local + frontend Vercel)
-//   2. APP_URL (URL du frontend de production)
-//   3. ALLOWED_ORIGINS (liste séparée par des virgules,
-//      ex. "https://app.stone.com,https://stone.com")
-//   4. les URLs de déploiement Vercel du projet (motif strict ci-dessous)
+// Buckets :
+//   strict : login, check-verification, refresh (anti brute-force)
+//   oauth  : URLs + callbacks OAuth
+//   api    : toutes les autres routes authentifiées
 //
-// Comme les credentials sont activés, on ne renvoie JAMAIS "*" :
-// on renvoie l'origine exacte du navigateur, uniquement si elle est
-// autorisée.
+// TRUST_PROXY=1 derrière Railway pour utiliser X-Forwarded-For.
+
+const TRUST_PROXY = env("TRUST_PROXY") === "1" || IS_PRODUCTION;
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+
+  if (TRUST_PROXY && typeof forwarded === "string") {
+    const first = forwarded.split(",")[0].trim();
+    if (first) return first;
+  }
+
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function createRateLimiter({ windowMs, max, label }) {
+  const hits = new Map();
+
+  // Nettoyage périodique pour éviter une fuite mémoire.
+  const cleaner = setInterval(() => {
+    const cutoff = Date.now() - windowMs;
+
+    for (const [key, timestamps] of hits) {
+      const fresh = timestamps.filter((t) => t > cutoff);
+
+      if (fresh.length === 0) hits.delete(key);
+      else hits.set(key, fresh);
+    }
+  }, Math.min(windowMs, 5 * 60 * 1000));
+
+  cleaner.unref?.();
+
+  return {
+    check(key) {
+      const now = Date.now();
+      const cutoff = now - windowMs;
+
+      const timestamps = (hits.get(key) || []).filter((t) => t > cutoff);
+
+      if (timestamps.length >= max) {
+        const retryAfterMs = timestamps[0] + windowMs - now;
+
+        console.warn(
+          `[ratelimit:${label}] Requête refusée pour ${key} (${timestamps.length}/${max} en ${windowMs / 1000}s)`
+        );
+
+        return { allowed: false, retryAfterSec: Math.ceil(retryAfterMs / 1000) };
+      }
+
+      timestamps.push(now);
+      hits.set(key, timestamps);
+
+      return { allowed: true, retryAfterSec: null };
+    },
+  };
+}
+
+const limiterStrict = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  label: "auth",
+});
+
+const limiterOauth = createRateLimiter({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  label: "oauth",
+});
+
+const limiterApi = createRateLimiter({
+  windowMs: 60 * 1000,
+  max: 120,
+  label: "api",
+});
+
+// ============================================================
+// CORS
+// ============================================================
 
 function normalizeOrigin(value) {
   return String(value || "")
@@ -413,9 +460,6 @@ function normalizeOrigin(value) {
     .replace(/\/+$/, "");
 }
 
-// Origines fixes : développement local + frontend Vercel.
-// "https://stone-prod.vercel.app" est le domaine de production : c'est
-// là que TikTok / Pinterest renvoient l'utilisateur, il DOIT être autorisé.
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
@@ -423,10 +467,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://stone-prod-2fpb2146e-xsdevs-projects.vercel.app",
 ];
 
-// Les URLs de déploiement Vercel changent à chaque build
-// (stone-prod-<hash>-xsdevs-projects.vercel.app). Ce motif strict
-// n'accepte que les URLs du scope "xsdevs-projects" pour le projet
-// "stone-prod", en HTTPS uniquement.
 const VERCEL_DEPLOYMENT_ORIGIN_PATTERN =
   /^https:\/\/stone-prod(-[a-z0-9]+)?-xsdevs-projects\.vercel\.app$/;
 
@@ -462,14 +502,16 @@ function isOriginAllowed(origin) {
   );
 }
 
-// Origines refusées déjà signalées (évite de spammer les logs Railway).
 const warnedRejectedOrigins = new Set();
+
+// Liste explicite de headers autorisés (on ne réfléchit plus
+// aveuglément access-control-request-headers).
+const CORS_ALLOWED_HEADERS =
+  "Content-Type, Authorization, X-Requested-With";
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
 
-  // Le résultat dépend de l'en-tête Origin : les caches doivent le savoir,
-  // que l'origine soit autorisée ou non.
   res.setHeader("Vary", "Origin");
 
   if (origin) {
@@ -489,39 +531,101 @@ function setCorsHeaders(req, res) {
     "GET, POST, PUT, PATCH, DELETE, OPTIONS"
   );
 
-  // Si le navigateur annonce les headers de sa requête (preflight),
-  // on les accepte ; sinon valeur par défaut.
-  const requestedHeaders = req.headers["access-control-request-headers"];
-
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    typeof requestedHeaders === "string" && requestedHeaders
-      ? requestedHeaders
-      : "Content-Type, Authorization"
-  );
-
-  // Le navigateur peut mettre le preflight en cache 24 h.
+  res.setHeader("Access-Control-Allow-Headers", CORS_ALLOWED_HEADERS);
   res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+// ============================================================
+// VALIDATION DU redirectTo (anti open redirect)
+// ============================================================
+//
+// Le redirectTo fourni par le client doit être une URL dont l'origine
+// est explicitement autorisée (mêmes règles que CORS). N'importe
+// quelle autre valeur est ignorée et remplacée par le défaut.
+
+function sanitizeRedirectTo(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return DEFAULT_OAUTH_REDIRECT;
+  }
+
+  try {
+    const parsed = new URL(value);
+
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return DEFAULT_OAUTH_REDIRECT;
+    }
+
+    const origin = parsed.origin;
+
+    if (!isOriginAllowed(origin)) {
+      console.warn(
+        `[oauth] redirectTo refusé (origine non autorisée) : ${origin}`
+      );
+      return DEFAULT_OAUTH_REDIRECT;
+    }
+
+    return parsed.toString();
+  } catch {
+    return DEFAULT_OAUTH_REDIRECT;
+  }
+}
+
+// ============================================================
+// LOGGING SERVEUR + ERREURS
+// ============================================================
+
+function newRequestId() {
+  return crypto.randomUUID().slice(0, 8);
+}
+
+// En production, le client ne reçoit JAMAIS le message d'erreur
+// interne (fuite d'implémentation) : seulement un message générique
+// + un requestId corrélable aux logs serveur.
+function internalErrorResponse(res, requestId, error, context) {
+  console.error(`[${requestId}] ${context}:`, error);
+
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+
+  sendJson(res, 500, {
+    success: false,
+    error: IS_PRODUCTION
+      ? "Internal server error"
+      : error instanceof Error
+      ? error.message
+      : "Internal server error",
+    request_id: requestId,
+  });
 }
 
 // ============================================================
 // JSON BODY
 // ============================================================
 
+const MAX_JSON_BODY = 1024 * 1024; // 1 Mo suffit pour toutes nos routes JSON
+
 async function getJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    let rejected = false;
 
     req.on("data", (chunk) => {
+      if (rejected) return;
+
       body += chunk.toString();
 
-      if (body.length > 10 * 1024 * 1024) {
+      if (body.length > MAX_JSON_BODY) {
+        rejected = true;
         reject(new Error("Request body too large"));
         req.destroy();
       }
     });
 
     req.on("end", () => {
+      if (rejected) return;
+
       if (!body) {
         resolve({});
         return;
@@ -539,17 +643,91 @@ async function getJsonBody(req) {
 }
 
 // ============================================================
-// RAW BODY (nécessaire pour vérifier la signature Stripe)
+// RAW BODY (signature Stripe)
 // ============================================================
+
+const MAX_RAW_BODY = MAX_JSON_BODY; // les payloads Stripe sont petits
 
 function getRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
+    let size = 0;
+    let rejected = false;
 
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("data", (chunk) => {
+      if (rejected) return;
+
+      size += chunk.length;
+      chunks.push(chunk);
+
+      if (size > MAX_RAW_BODY) {
+        rejected = true;
+        reject(new Error("Webhook body too large"));
+        req.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      if (!rejected) resolve(Buffer.concat(chunks));
+    });
+
     req.on("error", reject);
   });
+}
+
+// ============================================================
+// VALIDATION DU TYPE D'IMAGE (magic bytes, pas le header client)
+// ============================================================
+//
+// Le Content-Type envoyé par le client est arbitraire : on vérifie
+// les magic bytes du buffer. SVG volontairement EXCLU (XSS possible
+// via un SVG servi depuis le domaine public du bucket).
+
+const ALLOWED_AVATAR_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+function sniffImageType(buffer) {
+  if (!buffer || buffer.length < 12) return null;
+
+  // PNG : 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47
+  ) {
+    return "image/png";
+  }
+
+  // JPEG : FF D8 FF
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg";
+  }
+
+  // GIF : "GIF8"
+  if (
+    buffer[0] === 0x47 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x38
+  ) {
+    return "image/gif";
+  }
+
+  // WebP : "RIFF"...."WEBP"
+  if (
+    buffer[0] === 0x52 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x46 &&
+    buffer[8] === 0x57 &&
+    buffer[9] === 0x45 &&
+    buffer[10] === 0x42 &&
+    buffer[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+
+  return null;
 }
 
 // ============================================================
@@ -587,8 +765,7 @@ function parseAvatarUpload(req) {
 
       fileFound = true;
       fileName = info?.filename || fileName;
-      mimeType =
-        info?.mimeType || info?.mimetype || "application/octet-stream";
+      mimeType = info?.mimeType || info?.mimetype || "application/octet-stream";
 
       const chunks = [];
 
@@ -640,7 +817,6 @@ function extractAvatarStoragePath(filePathOrUrl) {
   const markerIndex = filePathOrUrl.indexOf(marker);
 
   if (markerIndex !== -1) {
-    // On retire aussi un éventuel query string (?t=...)
     const raw = filePathOrUrl.slice(markerIndex + marker.length).split("?")[0];
 
     try {
@@ -657,9 +833,6 @@ function extractAvatarStoragePath(filePathOrUrl) {
   return null;
 }
 
-// Vérifie que le fichier appartient bien à l'utilisateur
-// (chemin de la forme "<user.id>/<fichier>") et n'essaie pas
-// de remonter dans l'arborescence.
 function isOwnedAvatarPath(storagePath, userId) {
   if (typeof storagePath !== "string") return false;
   if (storagePath.includes("..")) return false;
@@ -669,14 +842,56 @@ function isOwnedAvatarPath(storagePath, userId) {
 }
 
 // ============================================================
-// RESPONSE
+// LIMITE DE CONCURRENCE DES UPLOADS VIDÉO (anti OOM)
 // ============================================================
 //
-// Les headers CORS sont posés avec res.setHeader() au tout début de
-// chaque requête : res.writeHead() les conserve, donc toutes les
-// réponses (succès, 4xx, 5xx, 404) portent les headers CORS.
+// Chaque upload TikTok bufferise jusqu'à 100 Mo en RAM. Sans
+// limite de concurrence, quelques requêtes parallèles suffisent à
+// faire crasher le container Railway (OOM). MAX_VIDEO_UPLOADS
+// est la borne supérieure raisonnable pour une petite instance.
+
+const MAX_VIDEO_UPLOADS = Number(env("MAX_VIDEO_UPLOADS") || 2);
+let activeVideoUploads = 0;
+const videoUploadWaiters = [];
+
+function acquireVideoSlot() {
+  if (activeVideoUploads < MAX_VIDEO_UPLOADS) {
+    activeVideoUploads++;
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    videoUploadWaiters.push({ resolve, reject });
+
+    // File d'attente bornée : on refuse plutôt que d'empiler.
+    if (videoUploadWaiters.length > 10) {
+      videoUploadWaiters.pop();
+      reject(new Error("UPLOAD_QUEUE_FULL"));
+    }
+  });
+}
+
+function releaseVideoSlot() {
+  activeVideoUploads = Math.max(0, activeVideoUploads - 1);
+
+  const next = videoUploadWaiters.shift();
+
+  if (next) {
+    activeVideoUploads++;
+    next.resolve();
+  }
+}
+
+// ============================================================
+// RESPONSE
+// ============================================================
 
 function sendJson(res, statusCode, data) {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
+
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
   });
@@ -740,19 +955,6 @@ async function getAuthenticatedUser(req) {
 // ============================================================
 // NORMALISATION UTILISATEUR
 // ============================================================
-//
-// AVATAR : Supabase écrase `user_metadata.avatar_url` à CHAQUE
-// connexion Google (il mappe le champ `picture` de Google vers
-// `avatar_url`). Idem pour GitHub (`avatar_url`). On stocke donc
-// la photo choisie par l'utilisateur dans une clé protégée
-// `custom_avatar_url` qui n'est jamais touchée par l'OAuth, et on
-// la lit en priorité.
-//
-// Priorité :  custom_avatar_url  >  avatar_url  >  picture
-//
-// Si `custom_avatar_url` est une string (même vide), on l'utilise
-// telle quelle, ce qui permet aussi de "supprimer" l'avatar sans
-// que la photo du provider ne réapparaisse.
 
 function resolveAvatar(metadata) {
   if (typeof metadata.custom_avatar_url === "string") {
@@ -863,13 +1065,8 @@ async function syncSubscriptionToUser(userId, subscription) {
 }
 
 // ============================================================
-// STATE OAUTH SIGNÉ (TikTok + Pinterest, stateless, anti-CSRF)
+// STATE OAUTH SIGNÉ (anti-CSRF, stateless)
 // ============================================================
-//
-// Le state contient le provider, l'id utilisateur, une expiration
-// (10 min) et un aléa, le tout signé en HMAC. Le provider est inclus
-// dans la signature : un state TikTok ne peut pas être rejoué sur
-// Pinterest, et inversement.
 
 function hmac(value) {
   return crypto
@@ -942,12 +1139,10 @@ async function tiktokApi(
 
   const data = await response.json().catch(() => ({}));
 
-  // Format des endpoints /v2/oauth/* : { error: "invalid_grant", error_description }
   if (typeof data.error === "string") {
     throw new Error(data.error_description || data.error);
   }
 
-  // Format des autres endpoints : { error: { code: "ok" | "...", message } }
   if (data.error?.code && data.error.code !== "ok") {
     const err = new Error(data.error.message || data.error.code);
     err.tiktokCode = data.error.code;
@@ -960,9 +1155,6 @@ async function tiktokApi(
 // ============================================================
 // TIKTOK — STOCKAGE / REFRESH DES TOKENS
 // ============================================================
-//
-// Les tokens sont stockés dans la table `tiktok_accounts`
-// (RLS activé, aucune policy : seul le service role y accède).
 
 async function saveTikTokTokens(userId, t, extra = {}) {
   const now = Date.now();
@@ -997,7 +1189,6 @@ async function getTikTokAccount(userId) {
   return data || null;
 }
 
-// Retourne un access_token valide (le rafraîchit si nécessaire).
 async function getValidTikTokToken(userId) {
   const account = await getTikTokAccount(userId);
 
@@ -1095,8 +1286,8 @@ function parseVideoUpload(req) {
   });
 }
 
-// Règles TikTok : chunk entre 5 et 64 Mo, le dernier chunk peut
-// absorber le reste. Sous 64 Mo, un seul chunk suffit.
+// ⚠️ FIX : Math.floor perdait le dernier chunk partiel (une vidéo
+// de 75 Mo n'uploadait que 70 Mo). On utilise Math.ceil.
 function computeChunking(size) {
   const MB = 1024 * 1024;
 
@@ -1105,7 +1296,7 @@ function computeChunking(size) {
   }
 
   const chunkSize = 10 * MB;
-  return { chunkSize, totalChunks: Math.floor(size / chunkSize) };
+  return { chunkSize, totalChunks: Math.ceil(size / chunkSize) };
 }
 
 async function uploadVideoToTikTok(uploadUrl, buffer, mimeType, chunking) {
@@ -1157,15 +1348,6 @@ function sendTikTokError(res, error) {
 // ============================================================
 // PINTEREST — APPEL API
 // ============================================================
-//
-// - `base`  : PINTEREST_API_BASE (sandbox par défaut) ou
-//             PINTEREST_OAUTH_BASE pour les endpoints /oauth/token
-// - `basic` : true pour l'authentification Basic app_id:app_secret
-//             (requise par /oauth/token)
-//
-// Pinterest renvoie les erreurs sous la forme { code, message }
-// avec un statut HTTP non 2xx ; les erreurs OAuth peuvent aussi
-// utiliser { error, error_description }.
 
 async function pinterestApi(
   pathname,
@@ -1218,14 +1400,10 @@ async function pinterestApi(
 // ============================================================
 // PINTEREST — STOCKAGE / REFRESH DES TOKENS
 // ============================================================
-//
-// Les tokens sont stockés dans la table `pinterest_accounts`
-// (RLS activé, aucune policy : seul le service role y accède).
 
 async function savePinterestTokens(userId, t, extra = {}) {
   const now = Date.now();
 
-  // access_token : ~30 jours. refresh_token : ~1 an.
   const accessTtl = Number(t.expires_in) || 30 * 24 * 60 * 60;
   const refreshTtl =
     Number(t.refresh_token_expires_in) || 365 * 24 * 60 * 60;
@@ -1257,8 +1435,6 @@ async function getPinterestAccount(userId) {
   return data || null;
 }
 
-// Retourne un access_token valide (le rafraîchit si nécessaire).
-// Pas encore utilisé par une route : prêt pour la publication de pins.
 async function getValidPinterestToken(userId) {
   const account = await getPinterestAccount(userId);
 
@@ -1290,7 +1466,6 @@ async function getValidPinterestToken(userId) {
     },
   });
 
-  // Si Pinterest ne renvoie pas de nouveau refresh_token, on garde l'ancien.
   await savePinterestTokens(userId, {
     ...refreshed,
     refresh_token: refreshed.refresh_token || account.refresh_token,
@@ -1310,13 +1485,6 @@ function sendPinterestError(res, error) {
 // ============================================================
 // YOUTUBE — APPEL API GOOGLE
 // ============================================================
-//
-// Utilisé pour les endpoints OAuth (token, revoke) et pour l'API
-// YouTube Data v3.
-//
-// Formats d'erreur Google :
-//   - OAuth : { error: "invalid_grant", error_description: "..." }
-//   - API   : { error: { code, message, errors: [...] } }
 
 async function googleRequest(
   requestUrl,
@@ -1356,7 +1524,6 @@ async function googleRequest(
   return data;
 }
 
-// Chaîne YouTube du compte Google connecté (ou null si le compte n'en a pas).
 async function fetchYouTubeChannel(accessToken) {
   const data = await googleRequest(
     `${YOUTUBE_API_BASE}/channels?part=snippet&mine=true`,
@@ -1383,14 +1550,6 @@ async function fetchYouTubeChannel(accessToken) {
 // ============================================================
 // YOUTUBE — STOCKAGE / REFRESH DES TOKENS
 // ============================================================
-//
-// Les tokens sont stockés dans la table `youtube_accounts`
-// (RLS activé, aucune policy : seul le service role y accède).
-//
-// - access_token : ~1 h
-// - refresh_token : sans expiration, SAUF si l'écran de consentement
-//   est en mode "Testing" (7 jours) : Google renvoie alors
-//   refresh_token_expires_in, que l'on mémorise.
 
 async function saveYouTubeTokens(userId, t, extra = {}) {
   const now = Date.now();
@@ -1407,7 +1566,6 @@ async function saveYouTubeTokens(userId, t, extra = {}) {
   if (t.refresh_token) row.refresh_token = t.refresh_token;
   if (t.scope) row.scope = t.scope;
 
-  // undefined = ne pas toucher (cas du refresh) ; null / nombre = on écrit.
   if (t.refresh_token_expires_in !== undefined) {
     row.refresh_expires_at = t.refresh_token_expires_in
       ? new Date(now + Number(t.refresh_token_expires_in) * 1000).toISOString()
@@ -1431,8 +1589,6 @@ async function getYouTubeAccount(userId) {
   return data || null;
 }
 
-// Retourne un access_token valide (le rafraîchit si nécessaire).
-// Pas encore utilisé par une route : prêt pour la publication de vidéos.
 async function getValidYouTubeToken(userId) {
   const account = await getYouTubeAccount(userId);
 
@@ -1471,7 +1627,6 @@ async function getValidYouTubeToken(userId) {
       },
     });
   } catch (refreshError) {
-    // invalid_grant : token révoqué par l'utilisateur ou expiré (mode Testing).
     if (refreshError.googleError === "invalid_grant") {
       const err = new Error("YouTube session expired, please reconnect");
       err.statusCode = 401;
@@ -1499,26 +1654,13 @@ function sendYouTubeError(res, error) {
 // ============================================================
 
 const server = createServer(async (req, res) => {
-  // ----------------------------------------------------------
-  // CORS — TOUJOURS EN PREMIER
-  // ----------------------------------------------------------
-  //
-  // Exécuté avant toute lecture de body, toute authentification et
-  // toute route : aucune exception de la logique métier ne peut
-  // survenir avant que les headers CORS soient posés.
+  const requestId = newRequestId();
 
   try {
     setCorsHeaders(req, res);
   } catch (corsError) {
-    console.error("CORS error:", corsError);
+    console.error(`[${requestId}] CORS error:`, corsError);
   }
-
-  // ----------------------------------------------------------
-  // PREFLIGHT (OPTIONS) — répondu immédiatement
-  // ----------------------------------------------------------
-  //
-  // Un OPTIONS n'atteint jamais les routes, l'authentification
-  // ni le 404.
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, { "Content-Length": "0" });
@@ -1527,24 +1669,62 @@ const server = createServer(async (req, res) => {
   }
 
   try {
-    // ----------------------------------------------------------
-    // URL
-    // ----------------------------------------------------------
-    //
-    // Le host de la requête est fourni correctement par Railway
-    // (ex. stoneserv-production.up.railway.app). Il ne sert ici
-    // qu'à parser le chemin et les paramètres.
-
     const url = new URL(
       req.url || "/",
       `http://${req.headers.host || `localhost:${PORT}`}`
     );
 
-    // ==========================================================
-    // HEALTH
-    // ==========================================================
+    const clientIp = getClientIp(req);
 
-    if (req.method === "GET" && url.pathname === "/api/health") {
+    // ========================================================
+    // RATE LIMITING (par IP, avant toute logique métier)
+    // ========================================================
+    //
+    // strict : brute-force des credentials
+    // oauth  : génération d'URLs et callbacks OAuth
+    // api    : défaut pour tout le reste
+    //
+    // Les webhooks Stripe (serveur → serveur, signature vérifiée)
+    // et le health check sont exemptés.
+
+    const pathname = url.pathname;
+    const isStripeWebhook =
+      req.method === "POST" && pathname === "/api/stripe/webhook";
+    const isHealth = req.method === "GET" && pathname === "/api/health";
+
+    if (!isStripeWebhook && !isHealth) {
+      const limiter = pathname.startsWith("/api/auth/login") ||
+        pathname.startsWith("/api/auth/check-verification") ||
+        pathname.startsWith("/api/auth/signup") ||
+        pathname.startsWith("/api/auth/refresh")
+        ? limiterStrict
+        : pathname.startsWith("/api/auth/") ||
+          pathname.startsWith("/api/tiktok/auth/") ||
+          pathname.startsWith("/api/pinterest/auth/") ||
+          pathname.startsWith("/api/youtube/auth/")
+        ? limiterOauth
+        : limiterApi;
+
+      const { allowed, retryAfterSec } = limiter.check(clientIp);
+
+      if (!allowed) {
+        if (retryAfterSec) {
+          res.setHeader("Retry-After", String(retryAfterSec));
+        }
+
+        sendJson(res, 429, {
+          success: false,
+          error: "Too many requests. Please try again later.",
+        });
+        return;
+      }
+    }
+
+    // ========================================================
+    // HEALTH
+    // ========================================================
+
+    if (isHealth) {
       sendJson(res, 200, {
         success: true,
         server: "Stone",
@@ -1558,11 +1738,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — SIGN UP
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/auth/signup") {
+    if (req.method === "POST" && pathname === "/api/auth/signup") {
       const body = await getJsonBody(req);
 
       const email = String(body.email || "").trim().toLowerCase();
@@ -1591,13 +1771,21 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        sendJson(res, 400, {
+          success: false,
+          error: "Invalid email address",
+        });
+        return;
+      }
+
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
           data: {
-            first_name: firstName,
-            last_name: lastName,
+            first_name: firstName.slice(0, 100),
+            last_name: lastName.slice(0, 100),
           },
         },
       });
@@ -1627,11 +1815,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — LOGIN
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/auth/login") {
+    if (req.method === "POST" && pathname === "/api/auth/login") {
       const body = await getJsonBody(req);
 
       const email = String(body.email || "").trim().toLowerCase();
@@ -1651,6 +1839,9 @@ const server = createServer(async (req, res) => {
       });
 
       if (error) {
+        // Message volontairement générique côté brute-force : on
+        // laisse Supabase décider (il ne révèle pas l'existence
+        // du compte avec un message unique).
         sendJson(res, 401, {
           success: false,
           error: error.message,
@@ -1672,13 +1863,16 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // AUTH — CHECK EMAIL VERIFICATION (polling sans 401)
-    // ==========================================================
+    // ========================================================
+    // AUTH — CHECK EMAIL VERIFICATION
+    // ========================================================
+    //
+    // Cette route est un oracle de credentials : elle est sur le
+    // limiter STRICT (10 / 15 min / IP), comme le login.
 
     if (
       req.method === "POST" &&
-      url.pathname === "/api/auth/check-verification"
+      pathname === "/api/auth/check-verification"
     ) {
       const body = await getJsonBody(req);
 
@@ -1715,16 +1909,26 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         success: true,
         verified: Boolean(data.user?.email_confirmed_at),
+        session: data.session
+          ? {
+              access_token: data.session.access_token,
+              refresh_token: data.session.refresh_token,
+            }
+          : null,
       });
 
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — GOOGLE : URL D'AUTORISATION
-    // ==========================================================
+    // ========================================================
+    //
+    // ⚠️ FIX OPEN REDIRECT : redirectTo est validé avec
+    // sanitizeRedirectTo() (l'origine doit être dans la liste CORS).
+    // N'importe quelle URL non autorisée est remplacée par le défaut.
 
-    if (req.method === "POST" && url.pathname === "/api/auth/google/url") {
+    if (req.method === "POST" && pathname === "/api/auth/google/url") {
       let body = {};
 
       try {
@@ -1733,10 +1937,7 @@ const server = createServer(async (req, res) => {
         body = {};
       }
 
-      const redirectTo =
-        typeof body.redirectTo === "string" && body.redirectTo
-          ? body.redirectTo
-          : DEFAULT_OAUTH_REDIRECT;
+      const redirectTo = sanitizeRedirectTo(body.redirectTo);
 
       const { data, error: oauthError } =
         await supabaseOAuth.auth.signInWithOAuth({
@@ -1752,12 +1953,7 @@ const server = createServer(async (req, res) => {
         });
 
       if (oauthError || !data?.url) {
-        sendJson(res, 500, {
-          success: false,
-          error:
-            oauthError?.message || "Could not generate Google OAuth URL",
-        });
-
+        internalErrorResponse(res, requestId, oauthError, "google/url");
         return;
       }
 
@@ -1769,11 +1965,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — GITHUB : URL D'AUTORISATION
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/auth/github/url") {
+    if (req.method === "POST" && pathname === "/api/auth/github/url") {
       let body = {};
 
       try {
@@ -1782,10 +1978,7 @@ const server = createServer(async (req, res) => {
         body = {};
       }
 
-      const redirectTo =
-        typeof body.redirectTo === "string" && body.redirectTo
-          ? body.redirectTo
-          : DEFAULT_OAUTH_REDIRECT;
+      const redirectTo = sanitizeRedirectTo(body.redirectTo);
 
       const { data, error: oauthError } =
         await supabaseOAuth.auth.signInWithOAuth({
@@ -1798,12 +1991,7 @@ const server = createServer(async (req, res) => {
         });
 
       if (oauthError || !data?.url) {
-        sendJson(res, 500, {
-          success: false,
-          error:
-            oauthError?.message || "Could not generate GitHub OAuth URL",
-        });
-
+        internalErrorResponse(res, requestId, oauthError, "github/url");
         return;
       }
 
@@ -1815,20 +2003,20 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — LOGOUT
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+    if (req.method === "POST" && pathname === "/api/auth/logout") {
       sendJson(res, 200, { success: true });
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — REFRESH TOKEN
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/auth/refresh") {
+    if (req.method === "POST" && pathname === "/api/auth/refresh") {
       const body = await getJsonBody(req);
 
       const refreshToken = String(
@@ -1869,13 +2057,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // AUTH — RESEND VERIFICATION EMAIL
-    // ==========================================================
+    // ========================================================
 
     if (
       req.method === "POST" &&
-      url.pathname === "/api/auth/resend-verification"
+      pathname === "/api/auth/resend-verification"
     ) {
       const { user, error, code } = await getAuthenticatedUser(req);
 
@@ -1906,10 +2094,7 @@ const server = createServer(async (req, res) => {
       });
 
       if (resendError) {
-        sendJson(res, 500, {
-          success: false,
-          error: resendError.message,
-        });
+        internalErrorResponse(res, requestId, resendError, "resend");
         return;
       }
 
@@ -1921,11 +2106,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // CURRENT USER
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "GET" && url.pathname === "/api/user") {
+    if (req.method === "GET" && pathname === "/api/user") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -1941,11 +2126,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // USER PROFILE — GET
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "GET" && url.pathname === "/api/user/profile") {
+    if (req.method === "GET" && pathname === "/api/user/profile") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -1961,17 +2146,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // USER PROFILE — UPDATE
-    // ==========================================================
-    //
-    // IMPORTANT : on écrit l'avatar dans `custom_avatar_url` (clé
-    // custom, jamais touchée par l'OAuth) au lieu de `avatar_url`
-    // (que Supabase écrase à chaque login Google/GitHub).
+    // ========================================================
 
     if (
       (req.method === "PUT" || req.method === "PATCH") &&
-      url.pathname === "/api/user/profile"
+      pathname === "/api/user/profile"
     ) {
       const { user, token, error, code } = await getAuthenticatedUser(req);
 
@@ -1984,27 +2165,39 @@ const server = createServer(async (req, res) => {
 
       const metadata = { ...(user.user_metadata || {}) };
 
+      // Limitation des longueurs : user_metadata est borné côté
+      // Supabase (1 Ko par défaut) ; sans limite, un body de 1 Mo
+      // de JSON pouvait y être copié.
+      const MAX_FIELD = 500;
+
+      const limitedString = (value, max) =>
+        String(value ?? "").slice(0, max);
+
       if (
         body.firstName !== undefined ||
         body.first_name !== undefined
       ) {
-        metadata.first_name = String(
-          body.firstName ?? body.first_name ?? ""
+        metadata.first_name = limitedString(
+          body.firstName ?? body.first_name ?? "",
+          100
         );
       }
 
       if (body.lastName !== undefined || body.last_name !== undefined) {
-        metadata.last_name = String(body.lastName ?? body.last_name ?? "");
+        metadata.last_name = limitedString(
+          body.lastName ?? body.last_name ?? "",
+          100
+        );
       }
 
       if (body.bio !== undefined) {
-        metadata.bio = String(body.bio);
+        metadata.bio = limitedString(body.bio, MAX_FIELD);
       }
 
-      // ⚠️ Écrit dans custom_avatar_url, PAS dans avatar_url.
       if (body.avatarUrl !== undefined || body.avatar_url !== undefined) {
-        metadata.custom_avatar_url = String(
-          body.avatarUrl ?? body.avatar_url ?? ""
+        metadata.custom_avatar_url = limitedString(
+          body.avatarUrl ?? body.avatar_url ?? "",
+          1000
         );
       }
 
@@ -2014,10 +2207,7 @@ const server = createServer(async (req, res) => {
         });
 
       if (updateError) {
-        sendJson(res, 500, {
-          success: false,
-          error: updateError.message,
-        });
+        internalErrorResponse(res, requestId, updateError, "profile/update");
         return;
       }
 
@@ -2029,13 +2219,20 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // USER PASSWORD — UPDATE
-    // ==========================================================
+    // ========================================================
+    //
+    // ⚠️ NOTE : signInWithPassword pour vérifier le mot de passe
+    // courant crée une session Supabase supplémentaire. C'est le
+    // seul moyen simple avec le client actuel ; l'impact est limité
+    // (sessions multiples autorisées par défaut), mais si tu actives
+    // une limite de sessions côté Supabase, passe par une vérification
+    // dédiée. La route est protégée par le limiter API.
 
     if (
       (req.method === "PUT" || req.method === "POST") &&
-      url.pathname === "/api/user/password"
+      pathname === "/api/user/password"
     ) {
       const { user, token, error, code } = await getAuthenticatedUser(req);
 
@@ -2094,10 +2291,7 @@ const server = createServer(async (req, res) => {
         });
 
       if (updateError) {
-        sendJson(res, 500, {
-          success: false,
-          error: updateError.message,
-        });
+        internalErrorResponse(res, requestId, updateError, "password/update");
         return;
       }
 
@@ -2109,11 +2303,15 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // USER AVATAR — UPLOAD
-    // ==========================================================
+    // ========================================================
+    //
+    // ⚠️ FIX XSS : le type est validé par MAGIC BYTES
+    // (sniffImageType), pas par le Content-Type du client.
+    // SVG exclu. Whitelist : PNG / JPEG / WebP / GIF.
 
-    if (req.method === "POST" && url.pathname === "/api/user/avatar") {
+    if (req.method === "POST" && pathname === "/api/user/avatar") {
       const { user, token, error, code } = await getAuthenticatedUser(req);
 
       if (!user || !token) {
@@ -2139,33 +2337,42 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      if (!upload.mimeType.startsWith("image/")) {
+      const sniffedType = sniffImageType(upload.buffer);
+
+      if (!sniffedType || !ALLOWED_AVATAR_TYPES.includes(sniffedType)) {
         sendJson(res, 400, {
           success: false,
-          error: "The uploaded file must be an image.",
+          error: "Unsupported image format. Use PNG, JPEG, WebP or GIF.",
         });
         return;
       }
 
-      const extension =
-        (upload.fileName.split(".").pop() || "png")
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, "") || "png";
+      const EXTENSION_BY_TYPE = {
+        "image/png": "png",
+        "image/jpeg": "jpg",
+        "image/webp": "webp",
+        "image/gif": "gif",
+      };
+
+      // Extension dérivée du type RÉEL, pas du nom de fichier client.
+      const extension = EXTENSION_BY_TYPE[sniffedType];
 
       const storagePath = `${user.id}/${crypto.randomUUID()}.${extension}`;
 
       const { error: uploadStorageError } = await supabaseAdmin.storage
         .from(AVATAR_BUCKET)
         .upload(storagePath, upload.buffer, {
-          contentType: upload.mimeType,
+          contentType: sniffedType,
           upsert: true,
         });
 
       if (uploadStorageError) {
-        sendJson(res, 500, {
-          success: false,
-          error: uploadStorageError.message,
-        });
+        internalErrorResponse(
+          res,
+          requestId,
+          uploadStorageError,
+          "avatar/upload"
+        );
         return;
       }
 
@@ -2181,14 +2388,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // USER AVATAR — DELETE
-    // ==========================================================
-    //
-    // SÉCURITÉ : on ne supprime que les fichiers situés dans le
-    // dossier de l'utilisateur authentifié (`<user.id>/...`).
+    // ========================================================
 
-    if (req.method === "DELETE" && url.pathname === "/api/user/avatar") {
+    if (req.method === "DELETE" && pathname === "/api/user/avatar") {
       const { user, token, error, code } = await getAuthenticatedUser(req);
 
       if (!user || !token) {
@@ -2210,8 +2414,6 @@ const server = createServer(async (req, res) => {
 
       const storagePath = extractAvatarStoragePath(filePathOrUrl);
 
-      // URL externe (avatar Google/GitHub) : rien à supprimer
-      // dans notre bucket.
       if (!storagePath) {
         sendJson(res, 200, { success: true });
         return;
@@ -2230,10 +2432,7 @@ const server = createServer(async (req, res) => {
         .remove([storagePath]);
 
       if (removeError) {
-        sendJson(res, 500, {
-          success: false,
-          error: removeError.message,
-        });
+        internalErrorResponse(res, requestId, removeError, "avatar/delete");
         return;
       }
 
@@ -2241,11 +2440,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // STRIPE — CRÉER UNE SESSION DE CHECKOUT
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/stripe/checkout") {
+    if (req.method === "POST" && pathname === "/api/stripe/checkout") {
       if (!stripe) {
         sendJson(res, 500, {
           success: false,
@@ -2301,20 +2500,17 @@ const server = createServer(async (req, res) => {
           url: session.url,
         });
       } catch (stripeError) {
-        sendJson(res, 500, {
-          success: false,
-          error: stripeError?.message || "Could not create checkout session",
-        });
+        internalErrorResponse(res, requestId, stripeError, "stripe/checkout");
       }
 
       return;
     }
 
-    // ==========================================================
-    // STRIPE — PORTAIL CLIENT (gérer / annuler l'abonnement)
-    // ==========================================================
+    // ========================================================
+    // STRIPE — PORTAIL CLIENT
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/stripe/portal") {
+    if (req.method === "POST" && pathname === "/api/stripe/portal") {
       if (!stripe) {
         sendJson(res, 500, {
           success: false,
@@ -2348,23 +2544,17 @@ const server = createServer(async (req, res) => {
 
         sendJson(res, 200, { success: true, url: session.url });
       } catch (stripeError) {
-        sendJson(res, 500, {
-          success: false,
-          error: stripeError?.message || "Could not open billing portal",
-        });
+        internalErrorResponse(res, requestId, stripeError, "stripe/portal");
       }
 
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // STRIPE — ABONNEMENT COURANT
-    // ==========================================================
+    // ========================================================
 
-    if (
-      req.method === "GET" &&
-      url.pathname === "/api/stripe/subscription"
-    ) {
+    if (req.method === "GET" && pathname === "/api/stripe/subscription") {
       if (!stripe) {
         sendJson(res, 500, {
           success: false,
@@ -2409,26 +2599,22 @@ const server = createServer(async (req, res) => {
             : null,
         });
       } catch (stripeError) {
-        sendJson(res, 500, {
-          success: false,
-          error: stripeError?.message || "Could not fetch subscription",
-        });
+        internalErrorResponse(
+          res,
+          requestId,
+          stripeError,
+          "stripe/subscription"
+        );
       }
 
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // STRIPE — WEBHOOK
-    // ==========================================================
-    //
-    // URL à configurer dans le dashboard Stripe :
-    // https://stoneserv-production.up.railway.app/api/stripe/webhook
-    //
-    // Les webhooks viennent des serveurs Stripe (pas d'en-tête Origin) :
-    // ils ne sont pas concernés par CORS, seule la signature compte.
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/stripe/webhook") {
+    if (req.method === "POST" && pathname === "/api/stripe/webhook") {
       if (!stripe || !STRIPE_WEBHOOK_SECRET) {
         sendJson(res, 500, {
           success: false,
@@ -2457,9 +2643,13 @@ const server = createServer(async (req, res) => {
           STRIPE_WEBHOOK_SECRET
         );
       } catch (webhookError) {
+        console.warn(
+          `[${requestId}] Webhook signature verification failed:`,
+          webhookError.message
+        );
         sendJson(res, 400, {
           success: false,
-          error: `Webhook signature verification failed: ${webhookError.message}`,
+          error: "Webhook signature verification failed",
         });
         return;
       }
@@ -2526,8 +2716,9 @@ const server = createServer(async (req, res) => {
             break;
         }
       } catch (handlerError) {
-        console.error("Stripe webhook handler error:", handlerError);
-        sendJson(res, 500, { success: false });
+        // 500 → Stripe retentera l'événement. Les handlers sont
+        // idempotents (upserts), un rejeu est sans risque.
+        internalErrorResponse(res, requestId, handlerError, "stripe/webhook");
         return;
       }
 
@@ -2535,11 +2726,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // TIKTOK — GARDE : configuration
-    // ==========================================================
+    // ========================================================
 
-    if (url.pathname.startsWith("/api/tiktok/") && !tiktokEnabled) {
+    if (pathname.startsWith("/api/tiktok/") && !tiktokEnabled) {
       sendJson(res, 500, {
         success: false,
         error: "TikTok is not configured",
@@ -2547,11 +2738,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // TIKTOK — URL D'AUTORISATION
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/tiktok/auth/url") {
+    if (req.method === "POST" && pathname === "/api/tiktok/auth/url") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2575,15 +2766,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // TIKTOK — CALLBACK (échange code -> tokens)
-    // ==========================================================
-    //
-    // Appelé par le frontend (TikTokCallback.tsx) avec { code, state }
-    // récupérés depuis sessionStorage après l'interception de
-    // /tiktok/callback?code=...&state=... par App.tsx.
+    // ========================================================
+    // TIKTOK — CALLBACK
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/tiktok/auth/callback") {
+    if (req.method === "POST" && pathname === "/api/tiktok/auth/callback") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2613,7 +2800,6 @@ const server = createServer(async (req, res) => {
           },
         });
 
-        // Profil TikTok (scope user.info.basic)
         let profile = {};
 
         try {
@@ -2646,11 +2832,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // TIKTOK — STATUT DE LA CONNEXION
-    // ==========================================================
+    // ========================================================
+    // TIKTOK — STATUT
+    // ========================================================
 
-    if (req.method === "GET" && url.pathname === "/api/tiktok/status") {
+    if (req.method === "GET" && pathname === "/api/tiktok/status") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2675,11 +2861,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // TIKTOK — DÉCONNEXION
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "DELETE" && url.pathname === "/api/tiktok/disconnect") {
+    if (req.method === "DELETE" && pathname === "/api/tiktok/disconnect") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2712,14 +2898,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // TIKTOK — INFOS CRÉATEUR (privacy options, durée max...)
-    // ==========================================================
-    //
-    // À appeler avant d'afficher le formulaire de publication :
-    // privacy_level_options liste les valeurs autorisées.
+    // ========================================================
+    // TIKTOK — INFOS CRÉATEUR
+    // ========================================================
 
-    if (req.method === "GET" && url.pathname === "/api/tiktok/creator-info") {
+    if (req.method === "GET" && pathname === "/api/tiktok/creator-info") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2743,19 +2926,16 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // TIKTOK — PUBLIER UNE VIDÉO (upload de fichier)
-    // ==========================================================
+    // ========================================================
     //
-    // multipart/form-data :
-    //   video          (fichier)  mp4 / mov / webm
-    //   mode           "direct" (video.publish) | "draft" (video.upload)
-    //   title          légende (direct uniquement)
-    //   privacy_level  PUBLIC_TO_EVERYONE | MUTUAL_FOLLOW_FRIENDS |
-    //                  FOLLOWER_OF_CREATOR | SELF_ONLY
-    //   disable_comment / disable_duet / disable_stitch  "true" | "false"
+    // ⚠️ FIX OOM : l'upload passe par un sémaphore
+    // (MAX_VIDEO_UPLOADS, défaut 2) : au plus 2 vidéos de 100 Mo
+    // bufferisées en RAM simultanément ; les autres requêtes
+    // attendent en file bornée ou reçoivent 503.
 
-    if (req.method === "POST" && url.pathname === "/api/tiktok/publish") {
+    if (req.method === "POST" && pathname === "/api/tiktok/publish") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2789,7 +2969,22 @@ const server = createServer(async (req, res) => {
 
       const mode = upload.fields.mode === "draft" ? "draft" : "direct";
 
+      // Acquiert un slot de concurrence AVANT de consommer de la
+      // mémoire ; libéré quoi qu'il arrive (finally).
+      let slotAcquired = false;
+
       try {
+        try {
+          await acquireVideoSlot();
+          slotAcquired = true;
+        } catch (slotError) {
+          sendJson(res, 503, {
+            success: false,
+            error: "Server is busy processing uploads. Try again shortly.",
+          });
+          return;
+        }
+
         const accessToken = await getValidTikTokToken(user.id);
         const chunking = computeChunking(upload.buffer.length);
 
@@ -2828,20 +3023,20 @@ const server = createServer(async (req, res) => {
         });
       } catch (tiktokError) {
         sendTikTokError(res, tiktokError);
+      } finally {
+        if (slotAcquired) releaseVideoSlot();
+        // Libère la référence au buffer pour le GC.
+        upload = null;
       }
 
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // TIKTOK — PUBLIER UNE VIDÉO DEPUIS UNE URL
-    // ==========================================================
-    //
-    // JSON : { mode, videoUrl, title, privacy_level, ... }
-    // ⚠️ Le domaine de videoUrl doit être vérifié dans le portail
-    // TikTok for Developers (URL properties).
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/tiktok/publish/url") {
+    if (req.method === "POST" && pathname === "/api/tiktok/publish/url") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2893,14 +3088,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // TIKTOK — STATUT D'UNE PUBLICATION
-    // ==========================================================
+    // ========================================================
 
-    if (
-      req.method === "GET" &&
-      url.pathname === "/api/tiktok/publish/status"
-    ) {
+    if (req.method === "GET" && pathname === "/api/tiktok/publish/status") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2923,8 +3115,6 @@ const server = createServer(async (req, res) => {
           json: { publish_id: publishId },
         });
 
-        // status : PROCESSING_UPLOAD | PROCESSING_DOWNLOAD |
-        //          SEND_TO_USER_INBOX | PUBLISH_COMPLETE | FAILED
         sendJson(res, 200, { success: true, ...result.data });
       } catch (tiktokError) {
         sendTikTokError(res, tiktokError);
@@ -2933,11 +3123,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // PINTEREST — GARDE : configuration
-    // ==========================================================
+    // ========================================================
 
-    if (url.pathname.startsWith("/api/pinterest/") && !pinterestEnabled) {
+    if (pathname.startsWith("/api/pinterest/") && !pinterestEnabled) {
       sendJson(res, 500, {
         success: false,
         error: "Pinterest is not configured",
@@ -2945,11 +3135,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // PINTEREST — URL D'AUTORISATION
-    // ==========================================================
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/pinterest/auth/url") {
+    if (req.method === "POST" && pathname === "/api/pinterest/auth/url") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -2973,17 +3163,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // PINTEREST — CALLBACK (échange code -> tokens)
-    // ==========================================================
-    //
-    // Appelé par le frontend (PinterestCallback.tsx) avec { code, state }
-    // récupérés depuis sessionStorage après l'interception de
-    // /pinterest/callback?code=...&state=... par App.tsx.
+    // ========================================================
+    // PINTEREST — CALLBACK
+    // ========================================================
 
     if (
       req.method === "POST" &&
-      url.pathname === "/api/pinterest/auth/callback"
+      pathname === "/api/pinterest/auth/callback"
     ) {
       const { user, error, code } = await getAuthenticatedUser(req);
 
@@ -3015,8 +3201,6 @@ const server = createServer(async (req, res) => {
           },
         });
 
-        // Profil Pinterest (scope user_accounts:read).
-        // Non bloquant : en sandbox, le profil peut être incomplet.
         let profile = {};
 
         try {
@@ -3049,15 +3233,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // PINTEREST — CONNEXION PAR TOKEN MANUEL (DEV / SANDBOX)
-    // ==========================================================
-    //
-    // Permet de tester sans redirect URI : on colle un access token
-    // généré dans le portail développeur Pinterest.
-    // Désactivé par défaut : PINTEREST_ALLOW_MANUAL_TOKEN=1 pour l'activer.
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/pinterest/auth/token") {
+    if (req.method === "POST" && pathname === "/api/pinterest/auth/token") {
       if (env("PINTEREST_ALLOW_MANUAL_TOKEN") !== "1") {
         sendJson(res, 403, {
           success: false,
@@ -3094,7 +3274,6 @@ const server = createServer(async (req, res) => {
       }
 
       try {
-        // Pas de refresh token : le compte devra être reconnecté à l'expiration.
         await savePinterestTokens(
           user.id,
           {
@@ -3110,7 +3289,7 @@ const server = createServer(async (req, res) => {
           }
         );
       } catch (saveError) {
-        sendJson(res, 500, { success: false, error: saveError.message });
+        internalErrorResponse(res, requestId, saveError, "pinterest/token");
         return;
       }
 
@@ -3127,11 +3306,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // PINTEREST — STATUT DE LA CONNEXION
-    // ==========================================================
+    // ========================================================
+    // PINTEREST — STATUT
+    // ========================================================
 
-    if (req.method === "GET" && url.pathname === "/api/pinterest/status") {
+    if (req.method === "GET" && pathname === "/api/pinterest/status") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -3157,16 +3336,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // PINTEREST — DÉCONNEXION
-    // ==========================================================
-    //
-    // On supprime simplement les tokens stockés (pas d'endpoint de
-    // révocation utilisé ici).
+    // ========================================================
 
     if (
       req.method === "DELETE" &&
-      url.pathname === "/api/pinterest/disconnect"
+      pathname === "/api/pinterest/disconnect"
     ) {
       const { user, error, code } = await getAuthenticatedUser(req);
 
@@ -3181,7 +3357,7 @@ const server = createServer(async (req, res) => {
         .eq("user_id", user.id);
 
       if (deleteError) {
-        sendJson(res, 500, { success: false, error: deleteError.message });
+        internalErrorResponse(res, requestId, deleteError, "pinterest/disconnect");
         return;
       }
 
@@ -3189,11 +3365,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // YOUTUBE — GARDE : configuration
-    // ==========================================================
+    // ========================================================
 
-    if (url.pathname.startsWith("/api/youtube/") && !youtubeEnabled) {
+    if (pathname.startsWith("/api/youtube/") && !youtubeEnabled) {
       sendJson(res, 500, {
         success: false,
         error: "YouTube is not configured",
@@ -3201,14 +3377,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // YOUTUBE — URL D'AUTORISATION
-    // ==========================================================
-    //
-    // access_type=offline + prompt=consent : garantit que Google
-    // renvoie un refresh_token à chaque connexion.
+    // ========================================================
 
-    if (req.method === "POST" && url.pathname === "/api/youtube/auth/url") {
+    if (req.method === "POST" && pathname === "/api/youtube/auth/url") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -3235,15 +3408,15 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // YOUTUBE — CALLBACK (échange code -> tokens)
-    // ==========================================================
+    // ========================================================
+    // YOUTUBE — CALLBACK
+    // ========================================================
     //
-    // Appelé par le frontend (YouTubeCallback.tsx) avec { code, state }
-    // récupérés depuis sessionStorage après l'interception de
-    // /youtube/callback?code=...&state=... par App.tsx.
+    // ⚠️ FIX : si le lookup de chaîne ÉCHOUE (erreur API, pas
+    // "pas de chaîne"), on REFUSE la connexion au lieu de
+    // sauvegarder silencieusement un compte sans chaîne.
 
-    if (req.method === "POST" && url.pathname === "/api/youtube/auth/callback") {
+    if (req.method === "POST" && pathname === "/api/youtube/auth/callback") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -3274,20 +3447,17 @@ const server = createServer(async (req, res) => {
           },
         });
 
-        // Chaîne YouTube : non bloquant si l'appel API échoue,
-        // mais un compte Google SANS chaîne est refusé.
         let channel = null;
-        let channelLookupFailed = false;
 
+        // Le lookup de chaîne est BLOQUANT : sans chaîne (ou en cas
+        // d'erreur de lookup), la connexion est refusée proprement.
         try {
           channel = await fetchYouTubeChannel(tokens.access_token);
         } catch (channelError) {
-          channelLookupFailed = true;
           console.warn("YouTube channels error:", channelError.message);
         }
 
-        if (!channelLookupFailed && !channel) {
-          // On révoque l'autorisation qui vient d'être donnée : elle est inutile.
+        if (!channel) {
           try {
             await googleRequest(GOOGLE_REVOKE_URL, {
               method: "POST",
@@ -3305,8 +3475,6 @@ const server = createServer(async (req, res) => {
           return;
         }
 
-        // Si Google ne renvoie pas de refresh_token, on garde l'ancien (saveYouTubeTokens
-        // n'écrase pas refresh_token quand il est absent).
         await saveYouTubeTokens(
           user.id,
           {
@@ -3314,10 +3482,10 @@ const server = createServer(async (req, res) => {
             refresh_token_expires_in: tokens.refresh_token_expires_in ?? null,
           },
           {
-            channel_id: channel?.id || null,
-            channel_title: channel?.title || null,
-            custom_url: channel?.customUrl || null,
-            avatar_url: channel?.avatarUrl || null,
+            channel_id: channel.id,
+            channel_title: channel.title || null,
+            custom_url: channel.customUrl || null,
+            avatar_url: channel.avatarUrl || null,
           }
         );
 
@@ -3325,8 +3493,8 @@ const server = createServer(async (req, res) => {
           success: true,
           connected: true,
           account: {
-            display_name: channel?.title || null,
-            avatar_url: channel?.avatarUrl || null,
+            display_name: channel.title || null,
+            avatar_url: channel.avatarUrl || null,
           },
         });
       } catch (youtubeError) {
@@ -3336,11 +3504,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
-    // YOUTUBE — STATUT DE LA CONNEXION
-    // ==========================================================
+    // ========================================================
+    // YOUTUBE — STATUT
+    // ========================================================
 
-    if (req.method === "GET" && url.pathname === "/api/youtube/status") {
+    if (req.method === "GET" && pathname === "/api/youtube/status") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -3366,14 +3534,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // YOUTUBE — DÉCONNEXION
-    // ==========================================================
-    //
-    // Révoque l'autorisation chez Google (best effort), puis supprime
-    // les tokens stockés.
+    // ========================================================
 
-    if (req.method === "DELETE" && url.pathname === "/api/youtube/disconnect") {
+    if (req.method === "DELETE" && pathname === "/api/youtube/disconnect") {
       const { user, error, code } = await getAuthenticatedUser(req);
 
       if (!user) {
@@ -3399,7 +3564,7 @@ const server = createServer(async (req, res) => {
           .eq("user_id", user.id);
 
         if (deleteError) {
-          sendJson(res, 500, { success: false, error: deleteError.message });
+          internalErrorResponse(res, requestId, deleteError, "youtube/disconnect");
           return;
         }
       }
@@ -3408,26 +3573,21 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // ==========================================================
+    // ========================================================
     // 404
-    // ==========================================================
+    // ========================================================
 
     sendJson(res, 404, {
       success: false,
       error: "Route not found",
-      path: url.pathname,
+      path: pathname,
       method: req.method,
     });
   } catch (error) {
-    // Les headers CORS ont déjà été posés plus haut : cette réponse
-    // d'erreur reste lisible par le navigateur.
-    if (!res.headersSent) {
-      sendJson(res, 500, {
-        success: false,
-        error:
-          error instanceof Error ? error.message : "Internal server error",
-      });
-    }
+    // ⚠️ FIX : plus de message d'erreur interne au client en
+    // production — seulement un message générique + requestId
+    // corrélable aux logs serveur.
+    internalErrorResponse(res, requestId, error, "unhandled");
   }
 });
 
@@ -3437,6 +3597,10 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Stone server running on port ${PORT}`);
+  console.log(`  NODE_ENV        : ${env("NODE_ENV") || "(non défini)"}`);
+  console.log(`  TRUST_PROXY     : ${TRUST_PROXY ? "1" : "0"}`);
+  console.log(`  Rate limits     : strict 10/15min · oauth 30/10min · api 120/min`);
+  console.log(`  Video uploads   : max ${MAX_VIDEO_UPLOADS} concurrent(s)`);
 });
 
 // ============================================================
@@ -3449,4 +3613,35 @@ server.on("error", (error) => {
   } else {
     console.error("Server error:", error);
   }
+});
+
+// ============================================================
+// ARRÊT PROPRE
+// ============================================================
+
+function shutdown(signal) {
+  console.log(`\n${signal} reçu — arrêt du serveur...`);
+
+  server.close(() => {
+    console.log("Serveur arrêté proprement.");
+    process.exit(0);
+  });
+
+  // Force l'arrêt si des connexions persistent.
+  setTimeout(() => {
+    console.error("Arrêt forcé : connexions encore ouvertes.");
+    process.exit(1);
+  }, 10_000).unref?.();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+  shutdown("uncaughtException");
 });
