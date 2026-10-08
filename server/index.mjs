@@ -11,9 +11,10 @@
 //                  (AES-256-GCM). Les anciens tokens en clair restent lisibles.
 //   Photos TikTok: URL publique de CE serveur, lue dans l'ordre :
 //                  PUBLIC_API_URL → VITE_API_BASE_URL → RAILWAY_PUBLIC_DOMAIN
-//                  (le domaine doit être vérifié chez TikTok).
+//                  (le préfixe /api/media/tiktok/ doit être vérifié chez TikTok).
 //   Optionnel    : ALLOWED_ORIGINS, TRUST_PROXY, TRUST_PROXY_HOPS,
-//                  MAX_VIDEO_UPLOADS, STRIPE_*, TIKTOK_*, PINTEREST_*, YOUTUBE_*
+//                  MAX_VIDEO_UPLOADS, TIKTOK_VERIFICATION_FILE,
+//                  STRIPE_*, TIKTOK_*, PINTEREST_*, YOUTUBE_*
 // ============================================================
 
 import { fileURLToPath } from "node:url";
@@ -244,6 +245,15 @@ const TIKTOK_PRIVACY_LEVELS = new Set([
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
 
+// Vérification du préfixe d'URL chez TikTok (URL properties).
+// TikTok fournit un fichier "<nom>.txt" dont le contenu est "<nom>".
+// Il est servi sur /api/media/tiktok/<nom>.txt (voir createServer).
+// Surchargeable via TIKTOK_VERIFICATION_FILE (avec ou sans ".txt").
+const TIKTOK_VERIFICATION_NAME = (
+  env("TIKTOK_VERIFICATION_FILE") ||
+  "tiktok-developers-site-verification=mRJN1EDyG6GdEuRBeOe9A5VyNF5FZTlU"
+).replace(/\.txt$/i, "");
+
 // URL publique de CE serveur, utilisée pour que TikTok télécharge les photos.
 // Ordre de lecture : PUBLIC_API_URL → VITE_API_BASE_URL → RAILWAY_PUBLIC_DOMAIN.
 // On retire le slash final ET un éventuel "/api" final (les routes média
@@ -285,7 +295,7 @@ function resolvePublicApiUrl() {
 
 // Photos / carrousels : TikTok ne les accepte que par PULL_FROM_URL.
 // Les images sont déposées temporairement dans un bucket Supabase privé,
-// puis servies par CE serveur sur PUBLIC_API_URL (domaine vérifié chez TikTok).
+// puis servies par CE serveur sur PUBLIC_API_URL (préfixe vérifié chez TikTok).
 const { url: PUBLIC_API_URL, source: PUBLIC_API_URL_SOURCE } =
   resolvePublicApiUrl();
 const TIKTOK_MEDIA_BUCKET = "tiktok-media";
@@ -1744,6 +1754,17 @@ async function tiktokApi(pathname, { method = "POST", token, json, form } = {}) 
 
   // Erreurs API ("ok" = succès)
   if (data.error?.code && data.error.code !== "ok") {
+    // Log serveur : code + log_id TikTok pour diagnostiquer (ex. url_ownership_unverified).
+    console.error(
+      "[tiktok]",
+      pathname,
+      JSON.stringify({
+        code: data.error.code,
+        message: data.error.message,
+        log_id: data.error.log_id,
+      })
+    );
+
     throw new HttpError(
       400,
       data.error.message || data.error.code,
@@ -3922,8 +3943,29 @@ const server = createServer(async (req, res) => {
 
     routeLabel = `${req.method} ${pathname}`;
 
-    // Images servies à TikTok (publique, nom aléatoire non devinable).
     if (req.method === "GET" || req.method === "HEAD") {
+      // Fichier de vérification TikTok (préfixe d'URL /api/media/tiktok/).
+      // Doit passer AVANT la route des médias : sa regex n'accepte que des
+      // noms hexadécimaux.
+      let decodedPath = pathname;
+
+      try {
+        decodedPath = decodeURIComponent(pathname);
+      } catch {
+        // chemin mal encodé : on garde la valeur brute
+      }
+
+      if (decodedPath === `/api/media/tiktok/${TIKTOK_VERIFICATION_NAME}.txt`) {
+        res.writeHead(200, {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Content-Length": Buffer.byteLength(TIKTOK_VERIFICATION_NAME),
+          "Cache-Control": "no-store",
+        });
+        res.end(req.method === "HEAD" ? undefined : TIKTOK_VERIFICATION_NAME);
+        return;
+      }
+
+      // Images servies à TikTok (publique, nom aléatoire non devinable).
       const mediaMatch = pathname.match(
         /^\/api\/media\/tiktok\/([a-f0-9]{32}\.(?:jpg|webp))$/
       );
@@ -4040,6 +4082,9 @@ server.listen(PORT, () => {
   );
 
   if (tiktokEnabled && PUBLIC_API_URL) {
+    console.log(
+      `  TikTok verif    : ${PUBLIC_API_URL}/api/media/tiktok/${TIKTOK_VERIFICATION_NAME}.txt`
+    );
     ensureTikTokMediaBucket().then(sweepTikTokMedia);
     setInterval(sweepTikTokMedia, 15 * 60 * 1000).unref?.();
   }
