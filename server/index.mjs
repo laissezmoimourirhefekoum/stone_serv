@@ -239,6 +239,22 @@ const TIKTOK_PRIVACY_LEVELS = new Set([
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
 
+// Photos / carrousels : TikTok ne les accepte que par PULL_FROM_URL.
+// Les images sont déposées temporairement dans un bucket Supabase privé,
+// puis servies par CE serveur sur PUBLIC_API_URL (domaine vérifié chez TikTok).
+const PUBLIC_API_URL = (env("PUBLIC_API_URL") || "").replace(/\/+$/, "");
+const TIKTOK_MEDIA_BUCKET = "tiktok-media";
+const TIKTOK_MEDIA_TTL_MS = 2 * 60 * 60 * 1000;
+const MAX_TIKTOK_PHOTOS = 35;
+const MAX_PHOTO_SIZE = 10 * 1024 * 1024;
+const MAX_PHOTOS_TOTAL = 80 * 1024 * 1024;
+
+if (tiktokEnabled && !PUBLIC_API_URL) {
+  console.warn(
+    "⚠️  PUBLIC_API_URL manquant — la publication de photos TikTok sera désactivée (ex. https://api.tondomaine.com)."
+  );
+}
+
 // ============================================================
 // CONFIGURATION PINTEREST
 // ============================================================
@@ -644,6 +660,9 @@ const limiterApi = createRateLimiter({ windowMs: 60 * 1000, max: 120, label: "ap
 const limiterAccount = createRateLimiter({ windowMs: 15 * 60 * 1000, max: 10, label: "account" });
 const limiterPublish = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20, label: "publish" });
 
+// Les serveurs TikTok téléchargent jusqu'à 35 images par publication.
+const limiterMedia = createRateLimiter({ windowMs: 60 * 1000, max: 600, label: "media" });
+
 function enforce(limiter, key) {
   const { allowed, retryAfterSec } = limiter.check(key);
 
@@ -1013,6 +1032,108 @@ function parseMultipart(req, { fileField, maxSize }) {
 
     // Un client qui coupe la connexion ne doit jamais laisser la
     // promesse (et donc un slot d'upload) pendante.
+    req.on("close", () => {
+      if (!req.complete) {
+        settle(reject, new HttpError(400, "Upload aborted"));
+      }
+    });
+    req.on("error", () =>
+      settle(reject, new HttpError(400, "Upload aborted"))
+    );
+
+    req.pipe(bb);
+  });
+}
+
+// Variante multi-fichiers (carrousel de photos).
+function parseMultipartFiles(req, { fileField, maxFiles, maxFileSize }) {
+  return new Promise((resolve, reject) => {
+    let bb;
+
+    try {
+      bb = busboy({
+        headers: req.headers,
+        limits: {
+          fileSize: maxFileSize,
+          files: maxFiles,
+          fields: 30,
+          fieldSize: 16 * 1024,
+          parts: maxFiles + 40,
+        },
+      });
+    } catch {
+      reject(new HttpError(400, "Invalid multipart request"));
+      return;
+    }
+
+    const fields = {};
+    const files = [];
+    let tooLarge = false;
+    let tooMany = false;
+    let settled = false;
+
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      fn(arg);
+    };
+
+    bb.on("file", (fieldname, file, info) => {
+      if (fieldname !== fileField) {
+        file.resume();
+        return;
+      }
+
+      const chunks = [];
+
+      file.on("data", (chunk) => chunks.push(chunk));
+      file.on("limit", () => {
+        tooLarge = true;
+      });
+      file.on("end", () => {
+        files.push({
+          buffer: Buffer.concat(chunks),
+          mimeType: info?.mimeType || "",
+          fileName: info?.filename || "",
+        });
+      });
+    });
+
+    bb.on("field", (name, value) => {
+      fields[name] = value;
+    });
+
+    bb.on("filesLimit", () => {
+      tooMany = true;
+    });
+
+    bb.on("partsLimit", () =>
+      settle(reject, new HttpError(400, "Too many fields"))
+    );
+
+    bb.on("close", () => {
+      if (tooLarge) {
+        settle(reject, new HttpError(400, "File too large", "FILE_TOO_LARGE"));
+        return;
+      }
+
+      if (tooMany) {
+        settle(reject, new HttpError(400, "Too many files", "TOO_MANY_FILES"));
+        return;
+      }
+
+      if (files.length === 0) {
+        settle(reject, new HttpError(400, "No file", "NO_FILE"));
+        return;
+      }
+
+      settle(resolve, { files, fields });
+    });
+
+    bb.on("error", () =>
+      settle(reject, new HttpError(400, "Could not read the uploaded files."))
+    );
+
     req.on("close", () => {
       if (!req.complete) {
         settle(reject, new HttpError(400, "Upload aborted"));
@@ -1763,6 +1884,153 @@ function buildPostInfo(fields) {
     disable_duet: toBool(fields.disable_duet),
     disable_stitch: toBool(fields.disable_stitch),
   };
+}
+
+// ============================================================
+// TIKTOK — PHOTOS (carrousel)
+// ============================================================
+//
+// 1 photo = post photo, 2 à 35 photos = carrousel.
+// Les fichiers vivent dans un bucket privé (nom aléatoire de 128 bits),
+// servis sans authentification sur /api/media/tiktok/<nom> pour que
+// TikTok puisse les télécharger, puis supprimés après TIKTOK_MEDIA_TTL_MS.
+
+async function ensureTikTokMediaBucket() {
+  const { error } = await supabaseAdmin.storage.createBucket(
+    TIKTOK_MEDIA_BUCKET,
+    { public: false }
+  );
+
+  if (error && !/already exists|duplicate/i.test(error.message || "")) {
+    console.warn("TikTok media bucket:", error.message);
+  }
+}
+
+async function sweepTikTokMedia() {
+  try {
+    const { data, error } = await supabaseAdmin.storage
+      .from(TIKTOK_MEDIA_BUCKET)
+      .list("", { limit: 1000 });
+
+    if (error || !data) return;
+
+    const cutoff = Date.now() - TIKTOK_MEDIA_TTL_MS;
+
+    const stale = data
+      .filter(
+        (file) =>
+          /^[a-f0-9]{32}\.(jpg|webp)$/.test(file.name || "") &&
+          file.created_at &&
+          new Date(file.created_at).getTime() < cutoff
+      )
+      .map((file) => file.name);
+
+    if (stale.length > 0) {
+      await supabaseAdmin.storage.from(TIKTOK_MEDIA_BUCKET).remove(stale);
+    }
+  } catch (error) {
+    console.warn("TikTok media sweep failed:", error?.message || error);
+  }
+}
+
+async function removeTikTokPhotos(names) {
+  try {
+    await supabaseAdmin.storage.from(TIKTOK_MEDIA_BUCKET).remove(names);
+  } catch {
+    // le balayage périodique s'en chargera
+  }
+}
+
+async function storeTikTokPhotos(photos) {
+  const names = photos.map(
+    (photo) =>
+      `${crypto.randomBytes(16).toString("hex")}.${
+        photo.type === "image/webp" ? "webp" : "jpg"
+      }`
+  );
+
+  try {
+    // Par lots pour ne pas ouvrir 35 connexions d'un coup.
+    const BATCH = 6;
+
+    for (let i = 0; i < photos.length; i += BATCH) {
+      await Promise.all(
+        photos.slice(i, i + BATCH).map(async (photo, offset) => {
+          const { error } = await supabaseAdmin.storage
+            .from(TIKTOK_MEDIA_BUCKET)
+            .upload(names[i + offset], photo.buffer, {
+              contentType: photo.type,
+              cacheControl: "3600",
+              upsert: false,
+            });
+
+          if (error) throw error;
+        })
+      );
+    }
+  } catch (error) {
+    await removeTikTokPhotos(names);
+    throw error;
+  }
+
+  return names;
+}
+
+// Route publique appelée par les serveurs TikTok (GET / HEAD).
+async function serveTikTokMedia(req, res, fileName) {
+  const { data, error } = await supabaseAdmin.storage
+    .from(TIKTOK_MEDIA_BUCKET)
+    .download(fileName);
+
+  if (error || !data) {
+    sendJson(res, 404, { success: false, error: "Not found" });
+    return;
+  }
+
+  const buffer = Buffer.from(await data.arrayBuffer());
+
+  res.writeHead(200, {
+    "Content-Type": fileName.endsWith(".webp") ? "image/webp" : "image/jpeg",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=3600",
+  });
+
+  res.end(req.method === "HEAD" ? undefined : buffer);
+}
+
+function initTikTokPhotoPublish(accessToken, mode, fields, imageUrls, coverIndex) {
+  const toBool = (v) => v === true || v === "true" || v === "1";
+
+  const caption = String(fields.title || "").trim();
+
+  const postInfo = {
+    title: caption.slice(0, 90),
+    description: caption.slice(0, 4000),
+  };
+
+  if (mode !== "draft") {
+    const privacy = String(fields.privacy_level || "SELF_ONLY");
+
+    postInfo.privacy_level = TIKTOK_PRIVACY_LEVELS.has(privacy)
+      ? privacy
+      : "SELF_ONLY";
+    postInfo.disable_comment = toBool(fields.disable_comment);
+    postInfo.auto_add_music = true;
+  }
+
+  return tiktokApi("/v2/post/publish/content/init/", {
+    token: accessToken,
+    json: {
+      post_info: postInfo,
+      source_info: {
+        source: "PULL_FROM_URL",
+        photo_cover_index: coverIndex, // 1 = première photo
+        photo_images: imageUrls,
+      },
+      post_mode: mode === "draft" ? "MEDIA_UPLOAD" : "DIRECT_POST",
+      media_type: "PHOTO",
+    },
+  });
 }
 
 // ============================================================
@@ -3056,6 +3324,131 @@ route(
   { auth: true }
 );
 
+// Photo(s) : 1 image = post photo, 2 à 35 images = carrousel.
+route(
+  "POST",
+  "/api/tiktok/publish/photos",
+  async ({ req, res, user }) => {
+    if (!PUBLIC_API_URL) {
+      throw new HttpError(
+        500,
+        "Photo publishing is not configured (PUBLIC_API_URL missing)",
+        "PUBLIC_API_URL_MISSING"
+      );
+    }
+
+    enforce(limiterPublish, `tiktok:${user.id}`);
+
+    const declared = Number(req.headers["content-length"] || 0);
+
+    if (declared > MAX_PHOTOS_TOTAL + 1024 * 1024) {
+      throw tooLargeError(
+        `Photos are too large. Maximum total size is ${MAX_PHOTOS_TOTAL / 1024 / 1024} MB.`
+      );
+    }
+
+    const accessToken = await getValidTikTokToken(user.id);
+
+    // Même sémaphore que les vidéos : borne la mémoire utilisée.
+    await acquireVideoSlot();
+
+    let storedNames = [];
+
+    try {
+      let upload;
+
+      try {
+        upload = await parseMultipartFiles(req, {
+          fileField: "photos",
+          maxFiles: MAX_TIKTOK_PHOTOS,
+          maxFileSize: MAX_PHOTO_SIZE,
+        });
+      } catch (error) {
+        if (error?.code === "FILE_TOO_LARGE") {
+          throw new HttpError(
+            400,
+            `Each photo must be under ${MAX_PHOTO_SIZE / 1024 / 1024} MB.`
+          );
+        }
+        if (error?.code === "TOO_MANY_FILES") {
+          throw new HttpError(
+            400,
+            `TikTok carousels are limited to ${MAX_TIKTOK_PHOTOS} photos.`
+          );
+        }
+        if (error?.code === "NO_FILE") {
+          throw new HttpError(400, "No photos were provided.");
+        }
+        throw error instanceof HttpError
+          ? error
+          : new HttpError(400, "Could not read the uploaded files.");
+      }
+
+      const photos = [];
+      let totalSize = 0;
+
+      for (const file of upload.files) {
+        const type = sniffImageType(file.buffer);
+
+        if (type !== "image/jpeg" && type !== "image/webp") {
+          throw new HttpError(
+            400,
+            "Unsupported image format. TikTok accepts JPEG and WebP."
+          );
+        }
+
+        totalSize += file.buffer.length;
+        photos.push({ buffer: file.buffer, type });
+      }
+
+      if (totalSize > MAX_PHOTOS_TOTAL) {
+        throw tooLargeError(
+          `Photos are too large. Maximum total size is ${MAX_PHOTOS_TOTAL / 1024 / 1024} MB.`
+        );
+      }
+
+      const fields = upload.fields;
+      const mode = fields.mode === "draft" ? "draft" : "direct";
+
+      const requestedCover = Number.parseInt(fields.cover_index, 10);
+      const coverIndex = Math.min(
+        Math.max(Number.isFinite(requestedCover) ? requestedCover : 1, 1),
+        photos.length
+      );
+
+      storedNames = await storeTikTokPhotos(photos);
+      upload = null; // libère les buffers
+
+      const imageUrls = storedNames.map(
+        (name) => `${PUBLIC_API_URL}/api/media/tiktok/${name}`
+      );
+
+      const init = await initTikTokPhotoPublish(
+        accessToken,
+        mode,
+        fields,
+        imageUrls,
+        coverIndex
+      );
+
+      // Les fichiers restent disponibles : TikTok les télécharge de
+      // façon asynchrone. Le balayage périodique les supprime ensuite.
+      sendJson(res, 200, {
+        success: true,
+        mode,
+        publish_id: init.data.publish_id,
+        photo_count: photos.length,
+      });
+    } catch (error) {
+      if (storedNames.length > 0) await removeTikTokPhotos(storedNames);
+      throw error;
+    } finally {
+      releaseVideoSlot();
+    }
+  },
+  { auth: true }
+);
+
 route(
   "GET",
   "/api/tiktok/publish/status",
@@ -3442,6 +3835,19 @@ const server = createServer(async (req, res) => {
 
     routeLabel = `${req.method} ${pathname}`;
 
+    // Images servies à TikTok (publique, nom aléatoire non devinable).
+    if (req.method === "GET" || req.method === "HEAD") {
+      const mediaMatch = pathname.match(
+        /^\/api\/media\/tiktok\/([a-f0-9]{32}\.(?:jpg|webp))$/
+      );
+
+      if (mediaMatch) {
+        enforce(limiterMedia, getClientIp(req));
+        await serveTikTokMedia(req, res, mediaMatch[1]);
+        return;
+      }
+    }
+
     // ----------------------------------------------------------
     // Rate limiting par IP, avant toute logique métier.
     // Exemptés : webhooks Stripe (serveur → serveur, signature
@@ -3538,6 +3944,12 @@ server.listen(PORT, () => {
   console.log(`  Token encryption: ${TOKEN_ENCRYPTION_KEY ? "on" : "off"}`);
   console.log(`  Rate limits     : strict 10/15min · oauth 30/10min · api 120/min`);
   console.log(`  Video uploads   : max ${MAX_VIDEO_UPLOADS} concurrent(s)`);
+  console.log(`  TikTok photos   : ${PUBLIC_API_URL ? PUBLIC_API_URL : "désactivé (PUBLIC_API_URL manquant)"}`);
+
+  if (tiktokEnabled && PUBLIC_API_URL) {
+    ensureTikTokMediaBucket().then(sweepTikTokMedia);
+    setInterval(sweepTikTokMedia, 15 * 60 * 1000).unref?.();
+  }
 });
 
 // ============================================================
