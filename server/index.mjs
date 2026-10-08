@@ -9,6 +9,9 @@
 //   Recommandé   : TOKEN_ENCRYPTION_KEY (32+ caractères aléatoires) →
 //                  chiffre les tokens TikTok / Pinterest / YouTube en base
 //                  (AES-256-GCM). Les anciens tokens en clair restent lisibles.
+//   Photos TikTok: URL publique de CE serveur, lue dans l'ordre :
+//                  PUBLIC_API_URL → VITE_API_BASE_URL → RAILWAY_PUBLIC_DOMAIN
+//                  (le domaine doit être vérifié chez TikTok).
 //   Optionnel    : ALLOWED_ORIGINS, TRUST_PROXY, TRUST_PROXY_HOPS,
 //                  MAX_VIDEO_UPLOADS, STRIPE_*, TIKTOK_*, PINTEREST_*, YOUTUBE_*
 // ============================================================
@@ -92,6 +95,8 @@ const sha256 = (value) =>
 const normalizeEmail = (value) => String(value ?? "").trim().toLowerCase();
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const toBool = (v) => v === true || v === "true" || v === "1";
 
 // Mutualise les appels concurrents identiques (refresh de token,
 // création de client Stripe...) : un seul vol, tout le monde attend
@@ -239,10 +244,50 @@ const TIKTOK_PRIVACY_LEVELS = new Set([
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
 
+// URL publique de CE serveur, utilisée pour que TikTok télécharge les photos.
+// Ordre de lecture : PUBLIC_API_URL → VITE_API_BASE_URL → RAILWAY_PUBLIC_DOMAIN.
+// On retire le slash final ET un éventuel "/api" final (les routes média
+// ajoutent déjà "/api/media/tiktok/..."). Une valeur relative (ex. "/api")
+// ou invalide est ignorée.
+function resolvePublicApiUrl() {
+  const candidates = [
+    ["PUBLIC_API_URL", env("PUBLIC_API_URL")],
+    ["VITE_API_BASE_URL", env("VITE_API_BASE_URL")],
+    [
+      "RAILWAY_PUBLIC_DOMAIN",
+      env("RAILWAY_PUBLIC_DOMAIN")
+        ? `https://${env("RAILWAY_PUBLIC_DOMAIN")}`
+        : undefined,
+    ],
+  ];
+
+  for (const [source, raw] of candidates) {
+    if (!raw) continue;
+
+    const value = raw
+      .replace(/\/+$/, "")
+      .replace(/\/api$/i, "")
+      .replace(/\/+$/, "");
+
+    try {
+      const parsed = new URL(value);
+
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+        return { url: value, source };
+      }
+    } catch {
+      // valeur relative ou invalide : on essaie la suivante
+    }
+  }
+
+  return { url: "", source: null };
+}
+
 // Photos / carrousels : TikTok ne les accepte que par PULL_FROM_URL.
 // Les images sont déposées temporairement dans un bucket Supabase privé,
 // puis servies par CE serveur sur PUBLIC_API_URL (domaine vérifié chez TikTok).
-const PUBLIC_API_URL = (env("PUBLIC_API_URL") || "").replace(/\/+$/, "");
+const { url: PUBLIC_API_URL, source: PUBLIC_API_URL_SOURCE } =
+  resolvePublicApiUrl();
 const TIKTOK_MEDIA_BUCKET = "tiktok-media";
 const TIKTOK_MEDIA_TTL_MS = 2 * 60 * 60 * 1000;
 const MAX_TIKTOK_PHOTOS = 35;
@@ -251,8 +296,18 @@ const MAX_PHOTOS_TOTAL = 80 * 1024 * 1024;
 
 if (tiktokEnabled && !PUBLIC_API_URL) {
   console.warn(
-    "⚠️  PUBLIC_API_URL manquant — la publication de photos TikTok sera désactivée (ex. https://api.tondomaine.com)."
+    "⚠️  PUBLIC_API_URL / VITE_API_BASE_URL manquant — la publication de photos TikTok sera désactivée (ex. https://api.tondomaine.com)."
   );
+}
+
+if (tiktokEnabled && PUBLIC_API_URL && !PUBLIC_API_URL.startsWith("https://")) {
+  console.warn(
+    `⚠️  ${PUBLIC_API_SOURCE_LABEL(PUBLIC_API_URL_SOURCE)} (${PUBLIC_API_URL}) n'est pas en https — TikTok refusera de télécharger les photos.`
+  );
+}
+
+function PUBLIC_API_SOURCE_LABEL(source) {
+  return source || "URL publique";
 }
 
 // ============================================================
@@ -441,6 +496,7 @@ if (env("DEBUG_ENV") === "1") {
   console.log("[env] ANON key length   :", SUPABASE_ANON_KEY.length);
   console.log("[env] SERVICE key length:", SUPABASE_SERVICE_ROLE_KEY.length);
   console.log("[env] APP_URL           :", JSON.stringify(APP_URL));
+  console.log("[env] PUBLIC_API_URL    :", JSON.stringify(PUBLIC_API_URL), `(${PUBLIC_API_URL_SOURCE || "aucune source"})`);
   console.log("[env] TIKTOK_REDIRECT   :", JSON.stringify(TIKTOK_REDIRECT_URI));
   console.log("[env] PINTEREST_REDIRECT:", JSON.stringify(PINTEREST_REDIRECT_URI));
   console.log("[env] PINTEREST_API_BASE:", JSON.stringify(PINTEREST_API_BASE));
@@ -1872,17 +1928,38 @@ async function uploadVideoToTikTok(uploadUrl, buffer, mimeType, chunking) {
   }
 }
 
-function buildPostInfo(fields) {
-  const toBool = (v) => v === true || v === "true" || v === "1";
+// Divulgation de contenu commercial (exigence TikTok) :
+//   brand_organic_toggle = « Your brand »      → « Promotional content »
+//   brand_content_toggle = « Branded content » → « Paid partnership »
+// Le contenu de marque ne peut pas être privé (SELF_ONLY).
+function brandFlags(fields, privacy) {
+  const content = toBool(fields.brand_content_toggle);
+  const organic = toBool(fields.brand_organic_toggle);
 
-  const privacy = String(fields.privacy_level || "SELF_ONLY");
+  if (content && privacy === "SELF_ONLY") {
+    throw new HttpError(
+      400,
+      "Branded content visibility cannot be set to private.",
+      "BRANDED_CONTENT_PRIVATE"
+    );
+  }
+
+  return content || organic
+    ? { brand_content_toggle: content, brand_organic_toggle: organic }
+    : {};
+}
+
+function buildPostInfo(fields) {
+  const requested = String(fields.privacy_level || "SELF_ONLY");
+  const privacy = TIKTOK_PRIVACY_LEVELS.has(requested) ? requested : "SELF_ONLY";
 
   return {
     title: String(fields.title || "").slice(0, 2200),
-    privacy_level: TIKTOK_PRIVACY_LEVELS.has(privacy) ? privacy : "SELF_ONLY",
+    privacy_level: privacy,
     disable_comment: toBool(fields.disable_comment),
     disable_duet: toBool(fields.disable_duet),
     disable_stitch: toBool(fields.disable_stitch),
+    ...brandFlags(fields, privacy),
   };
 }
 
@@ -1998,9 +2075,10 @@ async function serveTikTokMedia(req, res, fileName) {
   res.end(req.method === "HEAD" ? undefined : buffer);
 }
 
-function initTikTokPhotoPublish(accessToken, mode, fields, imageUrls, coverIndex) {
-  const toBool = (v) => v === true || v === "true" || v === "1";
-
+// Construit le post_info d'un post photo. Peut lever une HttpError
+// (ex. contenu de marque en privé) : on l'appelle AVANT de stocker les
+// photos pour ne rien déposer inutilement.
+function buildPhotoPostInfo(mode, fields) {
   const caption = String(fields.title || "").trim();
 
   const postInfo = {
@@ -2016,8 +2094,14 @@ function initTikTokPhotoPublish(accessToken, mode, fields, imageUrls, coverIndex
       : "SELF_ONLY";
     postInfo.disable_comment = toBool(fields.disable_comment);
     postInfo.auto_add_music = true;
+
+    Object.assign(postInfo, brandFlags(fields, postInfo.privacy_level));
   }
 
+  return postInfo;
+}
+
+function initTikTokPhotoPublish(accessToken, mode, postInfo, imageUrls, coverIndex) {
   return tiktokApi("/v2/post/publish/content/init/", {
     token: accessToken,
     json: {
@@ -3332,7 +3416,7 @@ route(
     if (!PUBLIC_API_URL) {
       throw new HttpError(
         500,
-        "Photo publishing is not configured (PUBLIC_API_URL missing)",
+        "Photo publishing is not configured (PUBLIC_API_URL / VITE_API_BASE_URL missing)",
         "PUBLIC_API_URL_MISSING"
       );
     }
@@ -3410,6 +3494,9 @@ route(
       const fields = upload.fields;
       const mode = fields.mode === "draft" ? "draft" : "direct";
 
+      // Validé AVANT de stocker les photos (ex. contenu de marque en privé).
+      const postInfo = buildPhotoPostInfo(mode, fields);
+
       const requestedCover = Number.parseInt(fields.cover_index, 10);
       const coverIndex = Math.min(
         Math.max(Number.isFinite(requestedCover) ? requestedCover : 1, 1),
@@ -3426,7 +3513,7 @@ route(
       const init = await initTikTokPhotoPublish(
         accessToken,
         mode,
-        fields,
+        postInfo,
         imageUrls,
         coverIndex
       );
@@ -3944,7 +4031,13 @@ server.listen(PORT, () => {
   console.log(`  Token encryption: ${TOKEN_ENCRYPTION_KEY ? "on" : "off"}`);
   console.log(`  Rate limits     : strict 10/15min · oauth 30/10min · api 120/min`);
   console.log(`  Video uploads   : max ${MAX_VIDEO_UPLOADS} concurrent(s)`);
-  console.log(`  TikTok photos   : ${PUBLIC_API_URL ? PUBLIC_API_URL : "désactivé (PUBLIC_API_URL manquant)"}`);
+  console.log(
+    `  TikTok photos   : ${
+      PUBLIC_API_URL
+        ? `${PUBLIC_API_URL} (via ${PUBLIC_API_URL_SOURCE})`
+        : "désactivé (PUBLIC_API_URL / VITE_API_BASE_URL manquant)"
+    }`
+  );
 
   if (tiktokEnabled && PUBLIC_API_URL) {
     ensureTikTokMediaBucket().then(sweepTikTokMedia);
