@@ -13,8 +13,14 @@
 //                  frontend), lue dans l'ordre :
 //                  PUBLIC_API_URL → VITE_API_BASE_URL → RAILWAY_PUBLIC_DOMAIN
 //                  (le préfixe /api/media/tiktok/ doit être vérifié chez TikTok).
-//   TikTok       : TIKTOK_AUDITED=1 une fois l'app auditée par TikTok
-//                  (sinon les publications sont forcées en SELF_ONLY).
+//   TikTok       : TIKTOK_AUDITED=1 une fois l'app auditée par TikTok.
+//                  Sinon l'app est en MODE SANDBOX :
+//                    - seuls les « Sandbox testers » du portail peuvent
+//                      autoriser l'app (sinon access_denied → 403 explicite)
+//                    - DIRECT_POST limité à privacy_level = SELF_ONLY
+//                    - posts photos forcés en brouillon (MEDIA_UPLOAD)
+//                  TIKTOK_FORCE_DRAFT=1 force TOUT en brouillons, même
+//                  après audit (pratique pour tester sans publier).
 //   Optionnel    : ALLOWED_ORIGINS, TRUST_PROXY, TRUST_PROXY_HOPS,
 //                  MAX_VIDEO_UPLOADS, TIKTOK_VERIFICATION_FILE,
 //                  TIKTOK_SKIP_PHOTO_PROBE=1, STRIPE_*, TIKTOK_*,
@@ -247,12 +253,38 @@ const TIKTOK_PRIVACY_LEVELS = new Set([
   "SELF_ONLY",
 ]);
 
-// Tant que l'app n'est pas auditée par TikTok, seules les publications
-// SELF_ONLY sont acceptées (erreur unaudited_client_can_only_post_to_private_accounts).
-// On force donc SELF_ONLY, sauf si TIKTOK_AUDITED=1.
+// ---- Mode sandbox -------------------------------------------------------
+//
+// TIKTOK_AUDITED=1  → app auditée : comportement normal (DIRECT_POST,
+//                     privacy au choix, photos en direct).
+// sinon             → SANDBOX :
+//                     - DIRECT_POST limité à privacy_level = SELF_ONLY
+//                     - photos forcées en brouillon (MEDIA_UPLOAD)
+//                     - seuls les « Sandbox testers » du portail peuvent
+//                       autoriser l'app (sinon access_denied)
+// TIKTOK_FORCE_DRAFT=1 → tout part en brouillon, même audité.
+
 const TIKTOK_AUDITED = env("TIKTOK_AUDITED") === "1";
+const TIKTOK_SANDBOX = !TIKTOK_AUDITED;
+const TIKTOK_FORCE_DRAFT = env("TIKTOK_FORCE_DRAFT") === "1";
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
+
+// Résumé des capacités effectives, renvoyé par les routes TikTok :
+// le frontend affiche un bandeau sandbox à partir de là.
+function tiktokCapabilities() {
+  return {
+    audited: TIKTOK_AUDITED,
+    sandbox: TIKTOK_SANDBOX,
+    force_draft: TIKTOK_FORCE_DRAFT,
+    can_direct_post: TIKTOK_AUDITED && !TIKTOK_FORCE_DRAFT,
+    forced_privacy_level:
+      TIKTOK_AUDITED && !TIKTOK_FORCE_DRAFT ? null : "SELF_ONLY",
+    photos_mode:
+      TIKTOK_AUDITED && !TIKTOK_FORCE_DRAFT ? "direct_or_draft" : "draft_only",
+    testers_only_auth: TIKTOK_SANDBOX,
+  };
+}
 
 // Webhook TikTok : écart maximal (en secondes) toléré entre l'horodatage signé
 // par TikTok et l'heure du serveur. 0 = contrôle désactivé. Défaut : 300 s.
@@ -358,9 +390,15 @@ if (tiktokEnabled && publicApiLooksLikeFrontend()) {
   );
 }
 
-if (tiktokEnabled && !TIKTOK_AUDITED) {
+if (tiktokEnabled && TIKTOK_SANDBOX) {
   console.warn(
-    "ℹ️  TikTok non audité (TIKTOK_AUDITED≠1) — les publications sont forcées en SELF_ONLY."
+    "ℹ️  TikTok en MODE SANDBOX (TIKTOK_AUDITED≠1) — DIRECT_POST limité à SELF_ONLY, photos en brouillon, seuls les « Sandbox testers » du portail peuvent se connecter."
+  );
+}
+
+if (tiktokEnabled && TIKTOK_FORCE_DRAFT) {
+  console.warn(
+    "ℹ️  TIKTOK_FORCE_DRAFT=1 — toutes les publications partent en brouillon."
   );
 }
 
@@ -553,6 +591,7 @@ if (env("DEBUG_ENV") === "1") {
   console.log("[env] PUBLIC_API_URL    :", JSON.stringify(PUBLIC_API_URL), `(${PUBLIC_API_URL_SOURCE || "aucune source"})`);
   console.log("[env] TIKTOK_REDIRECT   :", JSON.stringify(TIKTOK_REDIRECT_URI));
   console.log("[env] TIKTOK_AUDITED    :", TIKTOK_AUDITED);
+  console.log("[env] TIKTOK_FORCE_DRAFT:", TIKTOK_FORCE_DRAFT);
   console.log("[env] PINTEREST_REDIRECT:", JSON.stringify(PINTEREST_REDIRECT_URI));
   console.log("[env] PINTEREST_API_BASE:", JSON.stringify(PINTEREST_API_BASE));
   console.log("[env] YOUTUBE_REDIRECT  :", JSON.stringify(YOUTUBE_REDIRECT_URI));
@@ -1767,10 +1806,11 @@ function assertValidOAuthCallback(provider, body, userId) {
 // TIKTOK — APPEL API
 // ============================================================
 
-// Messages lisibles pour les erreurs TikTok les plus fréquentes.
+// Messages lisibles pour les erreurs TikTok les plus fréquentes,
+// enrichis du contexte sandbox.
 const TIKTOK_FRIENDLY_ERRORS = {
   unaudited_client_can_only_post_to_private_accounts:
-    "TikTok only allows private (SELF_ONLY) posts until the app is audited.",
+    "Mode sandbox : TikTok n'accepte que des posts privés (SELF_ONLY) tant que l'app n'est pas auditée. Définis privacy_level=SELF_ONLY ou passe en mode brouillon.",
   url_ownership_unverified:
     "TikTok could not verify the media URL prefix. Check PUBLIC_API_URL and the URL properties in the TikTok developer portal.",
   spam_risk_too_many_posts:
@@ -1783,6 +1823,10 @@ const TIKTOK_FRIENDLY_ERRORS = {
   // l'appli TikTok de l'utilisateur est trop ancienne (< 31.8).
   app_version_check_failed:
     "Please update your TikTok app to the latest version to use this feature, then try again.",
+  // En sandbox, seuls les « Sandbox testers » du portail peuvent
+  // autoriser l'app.
+  access_denied:
+    "Connection refused by TikTok. In sandbox mode, add the TikTok account as a Sandbox tester in the TikTok developer portal, then try again.",
 };
 
 async function tiktokApi(pathname, { method = "POST", token, json, form } = {}) {
@@ -2017,27 +2061,45 @@ async function uploadVideoToTikTok(uploadUrl, buffer, mimeType, chunking) {
   }
 }
 
-// Niveau de confidentialité effectif : tant que l'app n'est pas auditée,
-// TikTok n'accepte que SELF_ONLY.
+// ============================================================
+// TIKTOK — MODES / PRIVACY (logique sandbox)
+// ============================================================
+
+// Niveau de confidentialité effectif.
+//   - sandbox (non audité) → SELF_ONLY forcé
+//   - TIKTOK_FORCE_DRAFT   → SELF_ONLY (un brouillon reste consultable
+//     uniquement par le créateur, mais on borne quand même)
+//   - sinon                : valeur demandée si valide, sinon SELF_ONLY
 function resolvePrivacy(requested) {
-  if (!TIKTOK_AUDITED) return "SELF_ONLY";
+  if (TIKTOK_SANDBOX || TIKTOK_FORCE_DRAFT) return "SELF_ONLY";
 
   const value = String(requested || "SELF_ONLY");
   return TIKTOK_PRIVACY_LEVELS.has(value) ? value : "SELF_ONLY";
 }
 
+// Mode de publication vidéo :
+//   - "draft" demandé  → brouillon (inbox), toujours OK
+//   - "direct" demandé → brouillon si FORCE_DRAFT, sinon direct
+//     (en sandbox le direct reste possible mais SELF_ONLY)
+function resolveVideoMode(requested) {
+  if (TIKTOK_FORCE_DRAFT) return "draft";
+  return requested === "draft" ? "draft" : "direct";
+}
+
 // Divulgation de contenu commercial (exigence TikTok) :
 //   brand_organic_toggle = « Your brand »      → « Promotional content »
 //   brand_content_toggle = « Branded content » → « Paid partnership »
-// Le contenu de marque ne peut pas être privé (SELF_ONLY).
+// Le contenu de marque ne peut pas être privé (SELF_ONLY) → en sandbox
+// on le refuse explicitement (il serait de toute façon écrasé en SELF_ONLY).
 function brandFlags(fields, privacy) {
   const content = toBool(fields.brand_content_toggle);
   const organic = toBool(fields.brand_organic_toggle);
 
-  if (content && privacy === "SELF_ONLY") {
+  if ((content || organic) && privacy === "SELF_ONLY") {
     throw new HttpError(
       400,
-      "Branded content visibility cannot be set to private.",
+      "Branded content visibility cannot be set to private" +
+        (TIKTOK_SANDBOX ? " (mode sandbox : SELF_ONLY forcé)" : ""),
       "BRANDED_CONTENT_PRIVATE"
     );
   }
@@ -2060,6 +2122,21 @@ function buildPostInfo(fields) {
   };
 }
 
+async function initTikTokPublish(accessToken, mode, postInfoFields, sourceInfo) {
+  return mode === "draft"
+    ? tiktokApi("/v2/post/publish/inbox/video/init/", {
+        token: accessToken,
+        json: { source_info: sourceInfo },
+      })
+    : tiktokApi("/v2/post/publish/video/init/", {
+        token: accessToken,
+        json: {
+          post_info: buildPostInfo(postInfoFields),
+          source_info: sourceInfo,
+        },
+      });
+}
+
 // ============================================================
 // TIKTOK — PHOTOS (carrousel)
 // ============================================================
@@ -2068,6 +2145,9 @@ function buildPostInfo(fields) {
 // Les fichiers vivent dans un bucket privé (nom aléatoire de 128 bits),
 // servis sans authentification sur /api/media/tiktok/<nom> pour que
 // TikTok puisse les télécharger, puis supprimés après TIKTOK_MEDIA_TTL_MS.
+//
+// SANDBOX : TikTok refuse les posts photos DIRECT_POST des apps non
+// auditées → resolvePhotoMode() force le brouillon (MEDIA_UPLOAD).
 
 async function ensureTikTokMediaBucket() {
   const { error } = await supabaseAdmin.storage.createBucket(
@@ -2228,9 +2308,10 @@ async function probePublicPhoto(imageUrl) {
   }
 }
 
-// Construit le post_info d'un post photo. Peut lever une HttpError
-// (ex. contenu de marque en privé) : on l'appelle AVANT de stocker les
-// photos pour ne rien déposer inutilement.
+// Post_info d'un post photo.
+//   - mode "draft" : pas de privacy (TikTok l'ignore en MEDIA_UPLOAD)
+//   - mode "direct" : privacy résolue via resolvePrivacy()
+//     (SELF_ONLY forcé en sandbox)
 function buildPhotoPostInfo(mode, fields) {
   const caption = String(fields.title || "").trim();
 
@@ -2252,8 +2333,14 @@ function buildPhotoPostInfo(mode, fields) {
   return postInfo;
 }
 
-// coverIndex : index 0-based (0 = première photo), comme l'exige TikTok
-// pour photo_cover_index.
+// Mode de publication photo :
+//   - sandbox / FORCE_DRAFT → TOUJOURS "draft" (MEDIA_UPLOAD)
+//   - sinon : "draft" ou "direct" selon la demande
+function resolvePhotoMode(requested) {
+  if (TIKTOK_SANDBOX || TIKTOK_FORCE_DRAFT) return "draft";
+  return requested === "draft" ? "draft" : "direct";
+}
+
 function initTikTokPhotoPublish(accessToken, mode, postInfo, imageUrls, coverIndex) {
   const payload = {
     post_info: postInfo,
@@ -2280,21 +2367,6 @@ function initTikTokPhotoPublish(accessToken, mode, postInfo, imageUrls, coverInd
     token: accessToken,
     json: payload,
   });
-}
-
-async function initTikTokPublish(accessToken, mode, postInfoFields, sourceInfo) {
-  return mode === "draft"
-    ? tiktokApi("/v2/post/publish/inbox/video/init/", {
-        token: accessToken,
-        json: { source_info: sourceInfo },
-      })
-    : tiktokApi("/v2/post/publish/video/init/", {
-        token: accessToken,
-        json: {
-          post_info: buildPostInfo(postInfoFields),
-          source_info: sourceInfo,
-        },
-      });
 }
 
 // ============================================================
@@ -2596,10 +2668,6 @@ async function getValidYouTubeToken(userId) {
 // ============================================================
 // ROUTEUR
 // ============================================================
-//
-// Table de routes "METHOD /path" → handler. `auth: true` authentifie
-// l'utilisateur avant d'appeler le handler (ctx.user / ctx.token).
-// Les handlers lèvent des HttpError ; le serveur les traduit en JSON.
 
 const routes = new Map();
 
@@ -2619,7 +2687,9 @@ route("GET", "/api/health", ({ res }) => {
     server: "Stone",
     supabase: true,
     stripe: Boolean(stripe),
-    tiktok: tiktokEnabled,
+    tiktok: tiktokEnabled
+      ? { enabled: true, ...tiktokCapabilities() }
+      : { enabled: false },
     pinterest: pinterestEnabled,
     youtube: youtubeEnabled,
   });
@@ -3328,6 +3398,8 @@ route(
     sendJson(res, 200, {
       success: true,
       url: `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`,
+      // Le frontend peut afficher l'avertissement sandbox AVANT la popup.
+      capabilities: tiktokCapabilities(),
     });
   },
   { auth: true }
@@ -3343,15 +3415,37 @@ route(
     const account = await dedupeCallback(
       `tiktok:${user.id}:${sha256(authCode)}`,
       async () => {
-        const tokens = await tiktokApi("/v2/oauth/token/", {
-          form: {
-            client_key: TIKTOK_CLIENT_KEY,
-            client_secret: TIKTOK_CLIENT_SECRET,
-            code: authCode,
-            grant_type: "authorization_code",
-            redirect_uri: TIKTOK_REDIRECT_URI,
-          },
-        });
+        let tokens;
+
+        try {
+          tokens = await tiktokApi("/v2/oauth/token/", {
+            form: {
+              client_key: TIKTOK_CLIENT_KEY,
+              client_secret: TIKTOK_CLIENT_SECRET,
+              code: authCode,
+              grant_type: "authorization_code",
+              redirect_uri: TIKTOK_REDIRECT_URI,
+            },
+          });
+        } catch (error) {
+          // En sandbox, seuls les « Sandbox testers » déclarés dans le
+          // portail peuvent autoriser l'app : on remonte un message
+          // actionnable plutôt qu'un access_denied brut.
+          if (
+            error instanceof HttpError &&
+            (error.code === "access_denied" ||
+              /access_denied/i.test(error.message))
+          ) {
+            throw new HttpError(
+              403,
+              TIKTOK_SANDBOX
+                ? "TikTok refused the connection. In sandbox mode, add the TikTok account as a Sandbox tester in the TikTok developer portal, then try again."
+                : "TikTok refused the connection.",
+              "TIKTOK_ACCESS_DENIED"
+            );
+          }
+          throw error;
+        }
 
         let profile = {};
 
@@ -3378,7 +3472,11 @@ route(
       }
     );
 
-    sendJson(res, 200, { success: true, account });
+    sendJson(res, 200, {
+      success: true,
+      account,
+      capabilities: tiktokCapabilities(),
+    });
   },
   { auth: true }
 );
@@ -3392,7 +3490,6 @@ route(
     sendJson(res, 200, {
       success: true,
       connected: Boolean(account),
-      audited: TIKTOK_AUDITED,
       account: account
         ? {
             display_name: account.display_name,
@@ -3400,6 +3497,8 @@ route(
             scope: account.scope,
           }
         : null,
+      // Le frontend affiche le bandeau sandbox à partir de là.
+      capabilities: tiktokCapabilities(),
     });
   },
   { auth: true }
@@ -3453,8 +3552,8 @@ route(
 
     sendJson(res, 200, {
       success: true,
-      audited: TIKTOK_AUDITED,
       creator: result.data,
+      capabilities: tiktokCapabilities(),
     });
   },
   { auth: true }
@@ -3512,7 +3611,10 @@ route(
         throw new HttpError(400, "Unsupported format. Use MP4, MOV or WebM.");
       }
 
-      const mode = upload.fields.mode === "draft" ? "draft" : "direct";
+      // Sandbox : "direct" reste possible (SELF_ONLY forcé par
+      // resolvePrivacy) ; FORCE_DRAFT bascule tout en brouillon.
+      const requestedMode = upload.fields.mode === "draft" ? "draft" : "direct";
+      const mode = resolveVideoMode(requestedMode);
       const chunking = computeChunking(upload.buffer.length);
 
       const sourceInfo = {
@@ -3539,6 +3641,12 @@ route(
       sendJson(res, 200, {
         success: true,
         mode,
+        // mode_demandé ≠ mode_effectif quand FORCE_DRAFT est actif :
+        // le frontend peut informer l'utilisateur.
+        requested_mode: requestedMode,
+        forced_privacy_level:
+          mode === "direct" ? resolvePrivacy(upload.fields.privacy_level) : null,
+        sandbox: TIKTOK_SANDBOX,
         publish_id: init.data.publish_id,
       });
     } finally {
@@ -3550,7 +3658,7 @@ route(
 
 route(
   "POST",
-  "/api/tiktok/publish/url",
+  "/api/tiktok/publish_url",
   async ({ req, res, user }) => {
     enforce(limiterPublish, `tiktok:${user.id}`);
 
@@ -3561,7 +3669,8 @@ route(
       throw new HttpError(400, "videoUrl must be a valid https URL");
     }
 
-    const mode = body.mode === "draft" ? "draft" : "direct";
+    const requestedMode = body.mode === "draft" ? "draft" : "direct";
+    const mode = resolveVideoMode(requestedMode);
     const accessToken = await getValidTikTokToken(user.id);
 
     const init = await initTikTokPublish(accessToken, mode, body, {
@@ -3572,6 +3681,10 @@ route(
     sendJson(res, 200, {
       success: true,
       mode,
+      requested_mode: requestedMode,
+      forced_privacy_level:
+        mode === "direct" ? resolvePrivacy(body.privacy_level) : null,
+      sandbox: TIKTOK_SANDBOX,
       publish_id: init.data.publish_id,
     });
   },
@@ -3579,6 +3692,8 @@ route(
 );
 
 // Photo(s) : 1 image = post photo, 2 à 35 images = carrousel.
+// EN SANDBOX : mode brouillon forcé (MEDIA_UPLOAD) — TikTok refuse
+// les posts photos DIRECT_POST des apps non auditées.
 route(
   "POST",
   "/api/tiktok/publish/photos",
@@ -3678,7 +3793,10 @@ route(
       }
 
       const fields = upload.fields;
-      const mode = fields.mode === "draft" ? "draft" : "direct";
+      const requestedMode = fields.mode === "draft" ? "draft" : "direct";
+      // SANDBOX : resolvePhotoMode() force "draft" tant que l'app
+      // n'est pas auditée (les photos DIRECT_POST sont refusées).
+      const mode = resolvePhotoMode(requestedMode);
 
       // Validé AVANT de stocker les photos (ex. contenu de marque en privé).
       const postInfo = buildPhotoPostInfo(mode, fields);
@@ -3715,6 +3833,10 @@ route(
       sendJson(res, 200, {
         success: true,
         mode,
+        requested_mode: requestedMode,
+        // Le frontend affiche : « Mode sandbox : tes photos partent en
+        // brouillon sur TikTok. »
+        sandbox: TIKTOK_SANDBOX,
         publish_id: init.data.publish_id,
         photo_count: photos.length,
       });
@@ -3757,11 +3879,6 @@ route(
 // POST /api/tiktok/webhook  → URL à déclarer dans le portail TikTok for Developers
 // (≠ TIKTOK_REDIRECT_URI, qui est l'URL de retour OAuth du FRONTEND).
 //
-// Documentation officielle :
-//   https://developers.tiktok.com/docs/en/webhooks-overview
-//   https://developers.tiktok.com/docs/en/webhooks-events
-//   https://developers.tiktok.com/docs/en/webhooks-verification
-//
 // - En-tête  : TikTok-Signature: t=<timestamp>,s=<signature>
 // - Signature: HMAC-SHA256(client_secret, "<timestamp>.<corps brut>"), en hexadécimal
 // - TikTok exige une réponse 200 ; sinon il réessaie jusqu'à 72 h (livraison
@@ -3771,7 +3888,7 @@ const MAX_TIKTOK_WEBHOOK_BODY = 64 * 1024;
 const TIKTOK_WEBHOOK_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 const TIKTOK_WEBHOOK_DEDUPE_MAX = 5_000;
 // Marge (s) appliquée à la date de l'événement pour ne pas supprimer une
-// connexion rétablie APRÈS la révocation (voir handleTikTokAuthorizationRemoved).
+// connexion rétablie APRÈS la révocation.
 const TIKTOK_REVOKE_SKEW_SEC = 5;
 
 const processedTikTokWebhooks = new Map();
@@ -3858,16 +3975,11 @@ function verifyTikTokWebhookSignature(
   return { ok: true, timestamp: Number(parsed.timestamp) };
 }
 
-// Événement "authorization.removed" : l'utilisateur TikTok a retiré l'accès
-// (reason : 0 inconnu, 1 déconnexion depuis TikTok, 2 compte supprimé,
-// 3 âge modifié, 4 compte banni, 5 révocation par le développeur).
-// Les tokens sont déjà révoqués côté TikTok : on supprime l'association,
-// comme le fait DELETE /api/tiktok/disconnect.
-//
+// Événement "authorization.removed" : l'utilisateur TikTok a retiré l'accès.
+// Les tokens sont déjà révoqués côté TikTok : on supprime l'association.
 // Sécurité / idempotence :
-//  - le compte est identifié par open_id (user_openid), jamais par autre chose
-//  - on ne supprime que les lignes dont updated_at est antérieur à l'événement :
-//    un rejeu tardif ne peut pas détruire une connexion rétablie depuis
+//  - le compte est identifié par open_id, jamais par autre chose
+//  - on ne supprime que les lignes dont updated_at est antérieur à l'événement
 //  - rejouer l'événement est sans effet (0 ligne supprimée)
 async function handleTikTokAuthorizationRemoved(payload, requestId) {
   const openId = payload.user_openid;
@@ -4489,7 +4601,13 @@ server.listen(PORT, () => {
   console.log(`  Token encryption: ${TOKEN_ENCRYPTION_KEY ? "on" : "off"}`);
   console.log(`  Rate limits     : strict 10/15min · oauth 30/10min · api 240/min`);
   console.log(`  Video uploads   : max ${MAX_VIDEO_UPLOADS} concurrent(s)`);
-  console.log(`  TikTok audited  : ${TIKTOK_AUDITED ? "oui" : "non (SELF_ONLY forcé)"}`);
+  console.log(
+    `  TikTok mode     : ${
+      TIKTOK_SANDBOX
+        ? "SANDBOX (SELF_ONLY + photos en brouillon, testers uniquement)"
+        : "auditée (comportement normal)"
+    }${TIKTOK_FORCE_DRAFT ? " + FORCE_DRAFT (tout en brouillon)" : ""}`
+  );
   console.log(
     `  TikTok photos   : ${
       PUBLIC_API_URL
