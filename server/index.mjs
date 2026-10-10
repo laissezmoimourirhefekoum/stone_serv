@@ -2237,12 +2237,14 @@ function buildPhotoPostInfo(mode, fields) {
   return postInfo;
 }
 
+// coverIndex : index 0-based (0 = première photo), comme l'exige TikTok
+// pour photo_cover_index.
 function initTikTokPhotoPublish(accessToken, mode, postInfo, imageUrls, coverIndex) {
   const payload = {
     post_info: postInfo,
     source_info: {
       source: "PULL_FROM_URL",
-      photo_cover_index: coverIndex, // 1 = première photo
+      photo_cover_index: coverIndex, // 0 = première photo
       photo_images: imageUrls,
     },
     post_mode: mode === "draft" ? "MEDIA_UPLOAD" : "DIRECT_POST",
@@ -3666,10 +3668,13 @@ route(
       // Validé AVANT de stocker les photos (ex. contenu de marque en privé).
       const postInfo = buildPhotoPostInfo(mode, fields);
 
+      // Le frontend envoie cover_index à partir de 1 (1 = première photo).
+      // TikTok attend photo_cover_index à partir de 0 : on convertit et on
+      // borne dans [0, nombre de photos - 1].
       const requestedCover = Number.parseInt(fields.cover_index, 10);
       const coverIndex = Math.min(
-        Math.max(Number.isFinite(requestedCover) ? requestedCover : 1, 1),
-        photos.length
+        Math.max((Number.isFinite(requestedCover) ? requestedCover : 1) - 1, 0),
+        photos.length - 1
       );
 
       storedNames = await storeTikTokPhotos(photos);
