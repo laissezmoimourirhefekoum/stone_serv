@@ -254,6 +254,14 @@ const TIKTOK_AUDITED = env("TIKTOK_AUDITED") === "1";
 
 const tiktokEnabled = Boolean(TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET);
 
+// Webhook TikTok : écart maximal (en secondes) toléré entre l'horodatage signé
+// par TikTok et l'heure du serveur. 0 = contrôle désactivé. Défaut : 300 s.
+const TIKTOK_WEBHOOK_TOLERANCE_SEC = (() => {
+  const raw = env("TIKTOK_WEBHOOK_TOLERANCE_SEC");
+  const value = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(value) && value >= 0 ? value : 300;
+})();
+
 // Vérification du préfixe d'URL chez TikTok (URL properties).
 // TikTok fournit un fichier "<nom>.txt" dont le contenu est "<nom>".
 // Il est servi sur /api/media/tiktok/<nom>.txt (voir createServer).
@@ -765,6 +773,9 @@ const limiterPublish = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20, la
 
 // Les serveurs TikTok téléchargent jusqu'à 35 images par publication.
 const limiterMedia = createRateLimiter({ windowMs: 60 * 1000, max: 600, label: "media" });
+// Webhook TikTok (serveur -> serveur, signature vérifiée). Limite dédiée par IP :
+// large pour absorber les rafales/retries légitimes de TikTok, mais bornée.
+const limiterTiktokWebhook = createRateLimiter({ windowMs: 60 * 1000, max: 600, label: "tiktok-webhook" });
 
 function enforce(limiter, key) {
   const { allowed, retryAfterSec } = limiter.check(key);
@@ -3740,6 +3751,246 @@ route(
 );
 
 // ============================================================
+// ROUTES — TIKTOK WEBHOOK
+// ============================================================
+//
+// POST /api/tiktok/webhook  → URL à déclarer dans le portail TikTok for Developers
+// (≠ TIKTOK_REDIRECT_URI, qui est l'URL de retour OAuth du FRONTEND).
+//
+// Documentation officielle :
+//   https://developers.tiktok.com/docs/en/webhooks-overview
+//   https://developers.tiktok.com/docs/en/webhooks-events
+//   https://developers.tiktok.com/docs/en/webhooks-verification
+//
+// - En-tête  : TikTok-Signature: t=<timestamp>,s=<signature>
+// - Signature: HMAC-SHA256(client_secret, "<timestamp>.<corps brut>"), en hexadécimal
+// - TikTok exige une réponse 200 ; sinon il réessaie jusqu'à 72 h (livraison
+//   "au moins une fois" : le traitement doit être idempotent).
+
+const MAX_TIKTOK_WEBHOOK_BODY = 64 * 1024;
+const TIKTOK_WEBHOOK_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+const TIKTOK_WEBHOOK_DEDUPE_MAX = 5_000;
+// Marge (s) appliquée à la date de l'événement pour ne pas supprimer une
+// connexion rétablie APRÈS la révocation (voir handleTikTokAuthorizationRemoved).
+const TIKTOK_REVOKE_SKEW_SEC = 5;
+
+const processedTikTokWebhooks = new Map();
+
+function tiktokWebhookSeen(key) {
+  const expires = processedTikTokWebhooks.get(key);
+  if (!expires) return false;
+
+  if (expires <= Date.now()) {
+    processedTikTokWebhooks.delete(key);
+    return false;
+  }
+
+  return true;
+}
+
+function tiktokWebhookRemember(key) {
+  if (processedTikTokWebhooks.size >= TIKTOK_WEBHOOK_DEDUPE_MAX) {
+    processedTikTokWebhooks.delete(processedTikTokWebhooks.keys().next().value);
+  }
+
+  processedTikTokWebhooks.set(key, Date.now() + TIKTOK_WEBHOOK_DEDUPE_TTL_MS);
+}
+
+// "t=1633174587,s=<64 hex>" -> { timestamp, signature } ou null.
+function parseTikTokSignatureHeader(header) {
+  if (typeof header !== "string" || header.length > 512) return null;
+
+  let timestamp = null;
+  let signature = null;
+
+  for (const part of header.split(",")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+
+    if (key === "t" && timestamp === null) timestamp = value;
+    else if (key === "s" && signature === null) signature = value;
+  }
+
+  if (!timestamp || !/^\d{1,12}$/.test(timestamp)) return null;
+  if (!signature || !/^[a-f0-9]{64}$/i.test(signature)) return null;
+
+  return { timestamp, signature: signature.toLowerCase() };
+}
+
+function verifyTikTokWebhookSignature(
+  rawBody,
+  header,
+  secret,
+  toleranceSec = TIKTOK_WEBHOOK_TOLERANCE_SEC,
+  nowMs = Date.now()
+) {
+  if (!secret) return { ok: false, reason: "secret_missing" };
+
+  const parsed = parseTikTokSignatureHeader(header);
+  if (!parsed) return { ok: false, reason: "malformed_header" };
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(parsed.timestamp + ".")
+    .update(rawBody)
+    .digest();
+
+  const received = Buffer.from(parsed.signature, "hex");
+
+  if (
+    received.length !== expected.length ||
+    !crypto.timingSafeEqual(received, expected)
+  ) {
+    return { ok: false, reason: "bad_signature" };
+  }
+
+  if (toleranceSec > 0) {
+    const skewSec = Math.abs(nowMs / 1000 - Number(parsed.timestamp));
+
+    if (skewSec > toleranceSec) {
+      return { ok: false, reason: "timestamp_out_of_tolerance" };
+    }
+  }
+
+  return { ok: true, timestamp: Number(parsed.timestamp) };
+}
+
+// Événement "authorization.removed" : l'utilisateur TikTok a retiré l'accès
+// (reason : 0 inconnu, 1 déconnexion depuis TikTok, 2 compte supprimé,
+// 3 âge modifié, 4 compte banni, 5 révocation par le développeur).
+// Les tokens sont déjà révoqués côté TikTok : on supprime l'association,
+// comme le fait DELETE /api/tiktok/disconnect.
+//
+// Sécurité / idempotence :
+//  - le compte est identifié par open_id (user_openid), jamais par autre chose
+//  - on ne supprime que les lignes dont updated_at est antérieur à l'événement :
+//    un rejeu tardif ne peut pas détruire une connexion rétablie depuis
+//  - rejouer l'événement est sans effet (0 ligne supprimée)
+async function handleTikTokAuthorizationRemoved(payload, requestId) {
+  const openId = payload.user_openid;
+
+  if (typeof openId !== "string" || !/^[A-Za-z0-9._:-]{1,256}$/.test(openId)) {
+    throw new HttpError(400, "Invalid user_openid", "INVALID_PAYLOAD");
+  }
+
+  const createTime = payload.create_time;
+
+  if (!Number.isSafeInteger(createTime) || createTime <= 0) {
+    throw new HttpError(400, "Invalid create_time", "INVALID_PAYLOAD");
+  }
+
+  let reason = null;
+
+  if (typeof payload.content === "string") {
+    try {
+      const content = JSON.parse(payload.content);
+      if (content && Number.isInteger(content.reason)) reason = content.reason;
+    } catch {
+      // content illisible : la déconnexion est traitée quand même
+    }
+  }
+
+  const cutoff = new Date((createTime + TIKTOK_REVOKE_SKEW_SEC) * 1000).toISOString();
+
+  const { data, error } = await supabaseAdmin
+    .from("tiktok_accounts")
+    .delete()
+    .eq("open_id", openId)
+    .lte("updated_at", cutoff)
+    .select("user_id");
+
+  if (error) {
+    throw new Error("tiktok_accounts cleanup failed: " + error.message);
+  }
+
+  console.log(
+    "[" + requestId + "] [tiktok:webhook] authorization.removed" +
+      " openid=" + sha256(openId).slice(0, 10) +
+      " reason=" + (reason === null ? "n/a" : reason) +
+      " comptes_supprimés=" + (data ? data.length : 0)
+  );
+}
+
+// Événements documentés mais sans action pour cette application
+// (Video Kit / Data Portability) : accusés de réception uniquement.
+const TIKTOK_ACK_ONLY_EVENTS = new Set([
+  "video.upload.failed",
+  "video.publish.completed",
+  "portability.download.ready",
+]);
+
+route("POST", "/api/tiktok/webhook", async ({ req, res, requestId }) => {
+  // 1. Corps BRUT : la signature porte sur les octets exacts reçus.
+  const rawBody = await readBody(req, MAX_TIKTOK_WEBHOOK_BODY);
+
+  // 2. Authenticité, AVANT tout parsing JSON.
+  const check = verifyTikTokWebhookSignature(
+    rawBody,
+    req.headers["tiktok-signature"],
+    TIKTOK_CLIENT_SECRET
+  );
+
+  if (!check.ok) {
+    console.warn("[" + requestId + "] [tiktok:webhook] rejeté (" + check.reason + ")");
+    throw new HttpError(401, "Invalid webhook signature", "INVALID_SIGNATURE");
+  }
+
+  // 3. Structure du message (signé, donc émis par TikTok).
+  let payload;
+
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new HttpError(400, "Invalid JSON", "INVALID_JSON");
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new HttpError(400, "Invalid payload", "INVALID_PAYLOAD");
+  }
+
+  const eventName = payload.event;
+
+  if (
+    typeof eventName !== "string" ||
+    eventName.length > 100 ||
+    !/^[A-Za-z0-9_.]+$/.test(eventName)
+  ) {
+    throw new HttpError(400, "Invalid event", "INVALID_PAYLOAD");
+  }
+
+  if (typeof payload.client_key === "string" && payload.client_key !== TIKTOK_CLIENT_KEY) {
+    // Signé avec notre secret mais destiné à une autre clé : on ignore (200
+    // pour éviter des retries inutiles).
+    console.warn("[" + requestId + "] [tiktok:webhook] client_key inattendu : ignoré");
+    sendJson(res, 200, { received: true, ignored: true });
+    return;
+  }
+
+  // 4. Événement déjà traité (livraison "au moins une fois").
+  const dedupeKey = sha256(rawBody.toString("utf8"));
+
+  if (tiktokWebhookSeen(dedupeKey)) {
+    sendJson(res, 200, { received: true, duplicate: true });
+    return;
+  }
+
+  // 5. Traitement. Une exception => 500 => TikTok réessaiera (jusqu'à 72 h).
+  if (eventName === "authorization.removed") {
+    await handleTikTokAuthorizationRemoved(payload, requestId);
+  } else if (TIKTOK_ACK_ONLY_EVENTS.has(eventName)) {
+    console.log("[" + requestId + "] [tiktok:webhook] " + eventName + " reçu (aucune action)");
+  } else {
+    console.warn("[" + requestId + "] [tiktok:webhook] événement inconnu ignoré : " + eventName.slice(0, 60));
+  }
+
+  tiktokWebhookRemember(dedupeKey);
+  sendJson(res, 200, { received: true });
+});
+
+// ============================================================
 // ROUTES — PINTEREST
 // ============================================================
 
@@ -4146,7 +4397,12 @@ const server = createServer(async (req, res) => {
       req.method === "POST" && pathname === "/api/stripe/webhook";
     const isHealth = req.method === "GET" && pathname === "/api/health";
 
-    if (!isStripeWebhook && !isHealth) {
+    const isTiktokWebhook =
+      req.method === "POST" && pathname === "/api/tiktok/webhook";
+
+    if (isTiktokWebhook) {
+      enforce(limiterTiktokWebhook, getClientIp(req));
+    } else if (!isStripeWebhook && !isHealth) {
       enforce(pickLimiter(pathname), getClientIp(req));
     }
 
@@ -4241,6 +4497,15 @@ server.listen(PORT, () => {
         : "désactivé (PUBLIC_API_URL / VITE_API_BASE_URL manquant)"
     }`
   );
+
+  if (tiktokEnabled) {
+    console.log(
+      "  TikTok webhook  : " +
+        (PUBLIC_API_URL
+          ? PUBLIC_API_URL + "/api/tiktok/webhook"
+          : "/api/tiktok/webhook (PUBLIC_API_URL manquant : utilise le domaine public de ce serveur)")
+    );
+  }
 
   if (tiktokEnabled && PUBLIC_API_URL) {
     console.log(
