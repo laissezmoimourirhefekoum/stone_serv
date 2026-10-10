@@ -1768,6 +1768,10 @@ const TIKTOK_FRIENDLY_ERRORS = {
     "This TikTok account cannot post right now.",
   reached_active_user_cap:
     "TikTok daily user cap reached for this app. Try again later.",
+  // Renvoyée par TikTok pour les brouillons photo (MEDIA_UPLOAD) quand
+  // l'appli TikTok de l'utilisateur est trop ancienne (< 31.8).
+  app_version_check_failed:
+    "Please update your TikTok app to the latest version to use this feature, then try again.",
 };
 
 async function tiktokApi(pathname, { method = "POST", token, json, form } = {}) {
